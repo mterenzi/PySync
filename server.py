@@ -1,3 +1,4 @@
+from client import delete_down
 from file_structure import File_Structure
 from structure_comparer import Structure_Comparer
 import socket
@@ -33,34 +34,38 @@ def recv_bytes(conn, byte_total):
     return data
 
 
-def recv_file(conn, file_path, byte_total, last_mod):
+def recv_file(conn, file_path, byte_total):
     with open(file_path, 'wb+') as file:
         byte_count = 0
         while byte_count < byte_total:
             data = conn.recv(2048)
             file.write(data)
             byte_count += len(data)
-    os.utime(file_path, (last_mod, last_mod))
 
 
-def download_file(conn, path, root, struct):
-    req = f"REQUEST {path.replace(' ', '|')}"
+def download_file(conn, path, root):
+    req = f'REQUEST {path}'
     conn.sendall(req.encode())
+
     data = conn.recv(1024)
-    msg = data.decode('UTF-8').split(' ')
-    byte_total = int(msg[1])
+    info = json.loads(data)
+    if info['path'] != path:
+        raise MissSpeakException('REQUEST File')
+    byte_total = info['bytes']
+    ack = f"OK {byte_total}"
+    conn.sendall(ack.encode())
+
+    abs_path = path.replace('.', root, 1)
     if byte_total > 0:
-        if msg[0] == path.replace(' ', '|'):
-            req_confirm = f"OK {path.replace(' ', '|')} {byte_total}"
-            conn.sendall(req_confirm.encode())
-            file_path = path.replace('.', root, 1)
-            last_mod = struct[path]['last_mod']
-            recv_file(conn, file_path, int(byte_total), int(last_mod))
-        else:
-            raise MissSpeakException('REQUEST MissMatch')
+        recv_file(conn, abs_path, byte_total)
+    else:
+        open(abs_path, 'w+').close()
+    last_mod = int(info['last_mod'])
+    os.utime(abs_path, (last_mod, last_mod))
 
 
-def handle_creates(conn, creates, root, struct, client_struct):
+def handle_creates(conn, creates, struct, client_struct):
+    root = struct['root']
     down, up = creates
     down_dirs, down_files = down
     get_directories(down_dirs, root, client_struct)
@@ -81,14 +86,15 @@ def get_directories(dirs, root, struct):
 
 def get_files(conn, files, root, struct):
     for path in files:
-        download_file(conn, path, root, struct)
+        download_file(conn, path, root)
 
 
 def send_directories(conn, dirs, root, struct):
     for _dir in dirs:
-        path = _dir.replace('.', root, 1)
-        cmd = f"MKDIR {_dir.replace(' ', '|')} {struct[path]['last_mod']}"
+        abs_path = _dir.replace('.', root, 1)
+        cmd = f"MKDIR {_dir} {struct[abs_path]['last_mod']}"
         conn.sendall(cmd.encode())
+
         data = conn.recv(1024)
         if data == ('OK ' + cmd).encode():
             pass
@@ -97,19 +103,31 @@ def send_directories(conn, dirs, root, struct):
 
 
 def send_files(conn, up_files, root, struct):
-    for file in up_files:
-        path = file.replace('.', root, 1)
-        with open(path, 'rb') as f:
-            file_bytes = f.read()
-        file_info = f"MKFILE {file.replace(' ', '|')} {len(file_bytes)} {struct[path]['last_mod']}"
-        conn.sendall(file_info.encode())
+    for path in up_files:
+        abs_path = path.replace('.', root, 1)
+        info = struct[abs_path]
+        info['path'] = path
+        byte_total = os.path.getsize(abs_path)
+        info['bytes'] = byte_total
+        cmd = f"MKFILE {json.dumps(info)}"
+        conn.sendall(cmd.encode())
+
         data = conn.recv(1024)
-        if data == ('OK ' + file_info).encode():
-            if len(file_bytes) > 0:
-                conn.sendall(file_bytes)
-                data = conn.recv(1024)
-                if data != b'OK':
-                    raise MissSpeakException('MKFILE MissMatch')
+        client_ack = f"OK MKFILE {path} {byte_total}"
+        if data == client_ack.encode():
+            if byte_total > 0:
+                _bytes = 2048
+                bytes_read = 0
+                with open(abs_path, 'rb') as f:
+                    while bytes_read < byte_total:
+                        file_bytes = f.read(_bytes)
+                        conn.sendall(file_bytes)
+                        bytes_read += _bytes
+            data = conn.recv(1024)
+            if data != b'OK':
+                raise MissSpeakException('MKFILE ACK FINAL')
+        else:
+            raise MissSpeakException('MKFILE ACK')
 
 
 def down_deletes(down_dirs, down_files, root):
@@ -119,27 +137,27 @@ def down_deletes(down_dirs, down_files, root):
             shutil.rmtree(_dir)
         except FileNotFoundError:
             pass
+        except PermissionError:
+            pass
     for file in down_files:
         file = file.replace('.', root, 1)
         try:
             os.remove(file)
         except FileNotFoundError:
             pass
+        except PermissionError:
+            pass
 
 
 def up_deletes(conn, up_dirs, up_files):
-    for _dir in up_dirs:
-        cmd = f"DELETE {_dir.replace('|', ' ')}"
-        conn.send(cmd.encode())
+    deletes = up_dirs + up_files
+    for path in deletes:
+        cmd = f'DELETE {path}'
+        conn.sendall(cmd.encode())
+        
         data = conn.recv(1024)
-        if data != ('OK '+cmd).encode():
-            raise MissSpeakException('DELETE MissMatch')
-    for file in up_files:
-        cmd = f"DELETE {file.replace('|', ' ')}"
-        conn.send(cmd.encode())
-        data = conn.recv(1024)
-        if data != ('OK '+cmd).encode():
-            raise MissSpeakException('DELETE MissMatch')
+        if data != b'OK':
+            raise MissSpeakException('DELETE')
 
 
 def handle_deletes(conn, deletes, root):
@@ -163,15 +181,15 @@ def main(hostname, port, path):
             ssock = sock
             conn, addr = ssock.accept()
             client_struct = request_struct(conn)
-            comparer = Structure_Comparer(structure.get_structure(), client_struct.copy())
+            comparer = Structure_Comparer(structure.get_structure().copy(),
+                                            client_struct.copy())
             creates, deletes = comparer.compare_structures()
-            # print(creates)
-            # print(deletes)
             if creates is not None and deletes is not None:
-                handle_creates(conn, creates, structure.get_root(), structure.get_structure(), client_struct)
+                handle_creates(conn, creates, structure.get_structure(), client_struct)
                 handle_deletes(conn, deletes, structure.get_root())
             conn.sendall(b'BYE')
             print('Synced')
+            structure.update_structure()
             structure.save_structure()
 
 

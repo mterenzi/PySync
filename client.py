@@ -1,3 +1,4 @@
+import json
 import socket
 import ssl
 import os
@@ -24,61 +25,73 @@ def send_struct(conn, struct):
         raise MissSpeakException('STRUCT MissMatch')
 
 
-def send_files(conn, path, root):
-    file_path = path.replace('.', root, 1).replace('|', ' ')
-    with open(file_path, 'rb') as f:
-        file_bytes = f.read()
-    info = f"{path.replace(' ', '|')} {len(file_bytes)}"
-    conn.sendall(info.encode())
-    if len(file_bytes) > 0:
-        data = conn.recv(1024)
-        if data == ('OK '+info).encode():
-            conn.sendall(file_bytes)
-        else:
-            raise MissSpeakException('REQUEST MissMatch')
+def send_files(conn, path, struct):
+    root = struct['root']
+    abs_path = path.replace('.', root, 1)
+    info = struct[abs_path]
+    info['path'] = path
+    byte_total = os.path.getsize(abs_path)
+    info['bytes'] = byte_total
+    info_stream = json.dumps(info).encode()
+    conn.sendall(info_stream)
+
+    data = conn.recv(1024)
+    if data == f'OK {byte_total}'.encode():
+        if byte_total > 0:
+            _bytes = 2048
+            bytes_read = 0
+            with open(abs_path, 'rb') as f:
+                while bytes_read < byte_total:
+                    file_bytes = f.read(_bytes)
+                    conn.sendall(file_bytes)
+                    bytes_read += _bytes
+    else:
+        raise MissSpeakException('REQUEST File')
 
 
 def get_directory(conn, msg, root):
-    dir_path = msg[1].replace('.', root, 1).replace('|', ' ')
-    last_mod = int(msg[2])
+    msg = msg.decode('UTF-8')
+    msg_parts = msg.split(' ')
+    last_mod = int(msg_parts[-1])
+    dir_path = ' '.join(msg_parts[:-1]).replace('.', root, 1)
     os.makedirs(dir_path, exist_ok=True)
     os.utime(dir_path, (last_mod, last_mod))
-    ack = 'OK ' + ' '.join(msg)
+    ack = 'OK MKDIR ' + msg
     conn.sendall(ack.encode())
 
 
 def get_file(conn, msg, root):
-    path = msg[1].replace('|', ' ')
-    byte_total = int(msg[2])
-    last_mod = int(msg[3])
-    ack = 'OK ' + ' '.join(msg)
-    conn.send(ack.encode())
-    file_path = path.replace('.', root, 1)
-    with open(file_path, 'wb+') as f:
-        if byte_total > 0:
+    info = json.loads(msg)
+    file_path = info['path'].replace('.', root, 1)
+    with open(file_path, 'wb+') as file:
+        ack = f"OK MKFILE {info['path']} {info['bytes']}"
+        conn.sendall(ack.encode())
+
+        total_bytes = int(info['bytes'])
+        if total_bytes > 0:
             byte_count = 0
-            while byte_count < byte_total:
+            while byte_count < total_bytes:
                 data = conn.recv(2048)
-                f.write(data)
+                file.write(data)
                 byte_count += len(data)
+    last_mod = int(info['last_mod'])
     os.utime(file_path, (last_mod, last_mod))
-    conn.send(b'OK')
+    conn.sendall(b'OK')
 
 
 def delete_down(conn, msg, root):
-    path = msg[1].replace('.', root, 1).replace('|', ' ')
-    if os.path.isdir(path):
-        try:
-            shutil.rmtree(path)
-        except FileNotFoundError:
-            pass
-    else:
-        try:
-            os.remove(path)
-        except FileNotFoundError:
-            pass
-    ack = 'OK ' + ' '.join(msg)
-    conn.sendall(ack.encode())
+    path = msg.decode('UTF-8')
+    abs_path = path.replace('.', root, 1)
+    try:
+        if os.path.isdir(path):
+            shutil.rmtree(abs_path)
+        else:
+            os.remove(abs_path)
+    except FileNotFoundError:
+        pass
+    except PermissionError:
+        pass
+    conn.sendall(b'OK')
 
 
 
@@ -97,16 +110,15 @@ def main(hostname, port, path):
                 send_struct(ssock, structure)
             while data != b'BYE':
                 data = ssock.recv(1024)
-                msg = data.decode('UTF-8')
-                msg = msg.split(' ')
-                if msg[0] == 'REQUEST':
-                    send_files(ssock, msg[1], structure.get_root())
-                elif msg[0] == 'MKDIR':
-                    get_directory(ssock, msg, structure.get_root())
-                elif msg[0] == 'MKFILE':
-                    get_file(ssock, msg, structure.get_root())
-                elif msg[0] == 'DELETE':
-                    delete_down(ssock, msg, structure.get_root())
+                if data[0:7] == b'REQUEST':
+                    send_files(ssock, data[8:].decode('UTF-8'), structure.get_structure())
+                elif data[0:5] == b'MKDIR':
+                    get_directory(ssock, data[6:], structure.get_root())
+                elif data[0:6] == b'MKFILE':
+                    get_file(ssock, data[7:], structure.get_root())
+                elif data[0:6] == b'DELETE':
+                    delete_down(ssock, data[7:], structure.get_root())
+            structure.update_structure()
             structure.save_structure()
 
             

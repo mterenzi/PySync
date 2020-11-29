@@ -10,7 +10,9 @@ class File_Structure:
     def __init__(self, root, gitignore):
         self.__root = os.path.abspath(root)
         self.__gitignore = gitignore
-        self.__user_conf_path = os.path.join(os.path.expanduser('~'), '.pysync')
+        home_dir = os.path.expanduser('~')
+        conf_path = os.path.join(home_dir, 'conf')
+        self.__user_conf_path = os.path.join(conf_path, '.pysync')
         
         stripped_root = os.path.basename(os.path.normpath(self.__root))
         self.__json_path = os.path.join(self.__user_conf_path, stripped_root+'.json')
@@ -28,12 +30,9 @@ class File_Structure:
         return new_structure
 
     def __read_old_structure(self):
-        if os.path.exists(self.__user_conf_path):
-            if os.path.exists(self.__json_path):
-                with open(self.__json_path, 'r') as file:
-                    return json.load(file)
-        else:
-            os.mkdir(self.__user_conf_path)
+        if os.path.exists(self.__json_path):
+            with open(self.__json_path, 'r') as file:
+                return json.load(file)
         return None
 
     def __build_file_structure(self):
@@ -117,6 +116,7 @@ class File_Structure:
 
     def save_structure(self):
         print('Saving structure...')
+        os.makedirs(self.__user_conf_path, exist_ok=True)
         with open(self.__json_path, 'w+') as file:
             json.dump(self.__structure, file, indent=4)
         print('Structure saved.')
