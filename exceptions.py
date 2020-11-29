@@ -1,0 +1,3 @@
+
+class MissSpeakException(Exception):
+    pass
