@@ -7,14 +7,19 @@ import datetime
 
 class File_Structure:
 
-    def __init__(self, root, gitignore):
+    def __init__(self, root, gitignore, purge_limit):
         self.__root = os.path.abspath(root)
+        if not os.path.exists(self.__root):
+            os.mkdir(self.__root)
+
         self.__gitignore = gitignore
+        self.__purge_limit = purge_limit
         home_dir = os.path.expanduser('~')
-        conf_path = os.path.join(home_dir, 'conf')
-        self.__user_conf_path = os.path.join(conf_path, '.pysync')
-        
+
         stripped_root = os.path.basename(os.path.normpath(self.__root))
+        conf_path = os.path.join(home_dir, '.conf')
+        conf_path = os.path.join(conf_path, 'pysync')
+        self.__user_conf_path = os.path.join(conf_path, stripped_root)
         self.__json_path = os.path.join(self.__user_conf_path, stripped_root+'.json')
         
         print('Initializing file structure...')
@@ -105,6 +110,12 @@ class File_Structure:
                     timestamp = datetime.datetime.now().timestamp()
                     structure[path]['deleted'] = timestamp
                     structure[path]['last_mod'] = timestamp
+            else:
+                delete_time = datetime.datetime.fromtimestamp(info['deleted'])
+                now_time = datetime.datetime.now()
+                delta = now_time - delete_time
+                if delta.days > self.__purge_limit:
+                    del structure[path]
         return structure
 
     def update_structure(self):
@@ -130,7 +141,7 @@ class File_Structure:
         return json.dumps(new_structure)
 
     def get_structure(self):
-        return self.__structure
+        return self.__structure.copy()
 
     def print_structure(self):
         for path, info in self.__structure.items():
@@ -138,13 +149,3 @@ class File_Structure:
 
     def get_root(self):
         return self.__root
-
-
-
-if __name__ == "__main__":
-    file_structure = File_Structure('.\\folder1', gitignore=True)
-    file_structure.save_structure()
-    file_structure.print_structure()
-    file_structure = File_Structure('.\\folder2', gitignore=True)
-    file_structure.save_structure()
-    file_structure.print_structure()

@@ -13,9 +13,12 @@ class Structure_Comparer:
             new_structure[_path] = structure[path]
         return new_structure
 
-    def compare_structures(self):
+    def compare_structures(self, purge):
         creates = self.__find_creates()
-        deletes = self.__find_deletes()
+        if purge:
+            deletes = self.__find_deletes()
+        else:
+            deletes = ((), ())
         if len(creates[0]) == 0 and len(creates[1]) == 0 and len(deletes[0]) == 0 \
             and len(deletes[1]) == 0:
             return None, None
@@ -66,10 +69,3 @@ class Structure_Comparer:
         delete_up = self.__filter_deletes(self.__structure1, self.__structure2)
         delete_down = self.__filter_deletes(self.__structure2, self.__structure1)
         return delete_down, delete_up
-
-if __name__ == "__main__":
-    from file_structure import File_Structure
-    structure1 = File_Structure('.\\folder1', True).get_structure()
-    structure2 = File_Structure('.\\folder2', True).get_structure()
-    stry = Structure_Comparer(structure1, structure2)
-    stry.compare_structures()
