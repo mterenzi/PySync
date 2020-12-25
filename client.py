@@ -4,6 +4,7 @@ import ssl
 import os
 import shutil
 import re
+import stat
 from tempfile import gettempdir
 import zlib
 import gzip
@@ -12,49 +13,45 @@ from datetime import datetime
 from logger import Logger
 from exceptions import *
 from file_structure import File_Structure
+import time
 
 
 
 class Client:
 
-    def __init__(self, hostname, port, struct, **kwargs):
-        self.__hostname = hostname
-        self.__port = port
+    def __init__(self, struct, **kwargs):
         self.__struct = struct
-        self.__root = struct.get_root()
-
-        self.__conf = {
-            'purge': kwargs.get('purge', False),
-            'encrypt': kwargs.get('encrypt', False),
-            'compression': kwargs.get('compression', 0),
-            'compression_min': kwargs.get('compression_min', 1_000_000),
-            'ram': kwargs.get('ram', 2048),
-            'authenticate': kwargs.get('authenticate', False),
-            'backup': kwargs.get('backup', False),
-            'logging': kwargs.get('logging', False),
-            'MAC': ':'.join(re.findall('..', '%012x' % uuid.getnode())),
-        }
-
+        self.__hostname = kwargs.get('hostname')
+        self.__port = kwargs.get('port')
+        self.__root = kwargs.get('root')
+        self.__cert = kwargs.get('cert')
+        self.__configure(kwargs)
+        self.__logger = Logger(self.__conf['logging'], self.__conf_path, self.__hostname, False, self.__conf['logging_limit'])
+    
+    def __configure(self, kwargs):
         home_dir = os.path.expanduser('~')
         stripped_root = os.path.basename(os.path.normpath(self.__root))
         conf_path = os.path.join(home_dir, '.conf')
         conf_path = os.path.join(conf_path, 'pysync')
         self.__conf_path = os.path.join(conf_path, stripped_root)
         os.makedirs(self.__conf_path, exist_ok=True)
-
+        self.__conf = {
+            'purge': kwargs.get('purge', False),
+            'encryption': kwargs.get('encryption', False),
+            'compression': kwargs.get('compression', 0),
+            'compression_min': kwargs.get('compression_min', 1_000_000),
+            'ram': kwargs.get('ram', 2048),
+            'backup': kwargs.get('backup', False),
+            'backup_path': kwargs.get('backup_path', 'DEFAULT'),
+            'backup_limit': kwargs.get('backup_limit', 7),
+            'logging': kwargs.get('logging', 0),
+            'logging_limit': kwargs.get('logging_limit', 1_000_000),
+            'MAC': ':'.join(re.findall('..', '%012x' % uuid.getnode())),
+        }
         if self.__conf['backup']:
-            self.__backup_path = os.path.join(self.__conf_path, 'backups')
-            os.makedirs(self.__backup_path, exist_ok=True)
-
-        self.__logger = Logger(self.__conf_path, hostname, False) if self.__conf['logging'] else None
-        self.__conf['AUTH_KEY'] = self.__get_authkey() if self.__conf['authenticate'] else None
-
-    def __get_authkey(self):
-        self.__auth_path = os.path.join(self.__conf_path, 'keys_c.json')
-        if os.path.exists(self.__auth_path):
-            with open(self.__auth_path, 'r') as file:
-                keys = json.load(file)
-                return keys[self.__hostname]
+            if self.__conf['backup_path'] == 'DEFAULT':
+                self.__conf['backup_path'] = os.path.join(self.__conf_path, 'backups')
+            os.makedirs(self.__conf['backup_path'], exist_ok=True)
 
     def run(self):
         start_time = datetime.now()
@@ -63,28 +60,31 @@ class Client:
         self.__process()
         self.__conn.shutdown(socket.SHUT_RDWR)
         self.__conn.close()
-        self.__log('Connection with Server closed.')
+        self.__logger.log('Connection with Server closed.', 2)
+        if self.__conf['backup_limit'] is not None:
+            self.__purge_backups()
         time_elapsed = datetime.now() - start_time
-        self.__log(f'Time elapsed {time_elapsed}.')
+        self.__logger.log(f'Time elapsed {time_elapsed}.', 2)
 
     def __connect(self):
-        self.__log('Connecting to Server...')
+        self.__logger.log('Connecting to Server...', 2)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        if self.__conf['encrypt']:
+        if self.__conf['encryption']:
             context = ssl.create_default_context()
+            context.load_verify_locations(self.__cert)
             sock = context.wrap_socket(sock, server_hostname=self.__hostname)
         sock.connect((self.__hostname, self.__port))
-        self.__log('Connected to Server.')
+        self.__logger.log('Connected to Server.', 2)
         return sock
 
     def __sync_config(self):
-        self.__log('Syncing configuration...')
+        self.__logger.log('Syncing configuration...', 2)
         conf_stream = json.dumps(self.__conf).encode()
         self.__conn.sendall(conf_stream)
         data = self.__conn.recv(1024)
         self.__conf = json.loads(data)
         self.__conn.sendall(data)
-        self.__log('Sync configured.')
+        self.__logger.log('Sync configured.', 2)
 
     def __process(self):
         data = b'OPEN'
@@ -102,14 +102,9 @@ class Client:
                 self.__delete_down(data[7:])
             elif data[0:14] == b'CONFIRM DELETE':
                 self.__confirm_delete(data[15:])
-        if self.__conf['authenticate']:
-            new_auth_key = data[4:]
-            self.__save_auth_key(new_auth_key)
-            self.__conn.sendall(data)
-            self.__log('New key recieved.')
 
     def __send_struct(self):
-        self.__log('Sending struct...')
+        self.__logger.log('Sending struct...', 2)
         struct_bytes = self.__struct.dump_structure().encode('UTF-8')
         if self.__conf['compression'] and len(struct_bytes) >= self.__conf['compression_min']:
             struct_bytes = zlib.compress(struct_bytes, level=self.__conf['compression'])
@@ -120,7 +115,7 @@ class Client:
         msg = data.decode('UTF-8')
         if msg == f'OK {struct_info}':
             self.__conn.sendall(struct_bytes)
-            self.__log('Struct sent.')
+            self.__logger.log('Struct sent.', 2)
         else:
             raise MissSpeakException('STRUCT MissMatch')
 
@@ -141,11 +136,14 @@ class Client:
         if data == f'OK {byte_total}'.encode():
             if byte_total > 0:
                 bytes_read = 0
-                self.__log(f'Sending file {path} {byte_total}...')
+                self.__logger.log(f'Sending file {path} {byte_total}...', 4)
                 with open(abs_path, 'rb') as f:
                     byte_chunk = self.__conf['ram']
                     while bytes_read < byte_total:
-                        file_bytes = f.read(byte_chunk)
+                        if byte_chunk != -1:
+                            file_bytes = f.read(byte_chunk)
+                        else:
+                            file_bytes = f.read()
                         self.__conn.sendall(file_bytes)
                         bytes_read += byte_chunk
                 if compressed:
@@ -163,7 +161,7 @@ class Client:
         os.utime(abs_path, (last_mod, last_mod))
         ack = 'OK MKDIR ' + msg
         self.__conn.sendall(ack.encode())
-        self.__log(f'Recieved directory {dir_path}')
+        self.__logger.log(f'Recieved directory {dir_path}', 4)
 
     def __get_file(self, msg):
         info = json.loads(msg)
@@ -173,12 +171,14 @@ class Client:
         self.__conn.sendall(ack.encode())
 
         byte_total = int(info['bytes'])
-        self.__log(f'Receiving file {path} {byte_total}...')
+        self.__logger.log(f'Receiving file {path} {byte_total}...', 4)
         if byte_total > 0:
             if self.__conf['compression'] and byte_total >= self.__conf['compression_min']:
                 self.__recv_compressed_file(abs_path, byte_total)
             else:
                 self.__recv_file(abs_path, byte_total)
+        else:
+            open(abs_path, 'wb+').close()
         last_mod = int(info['last_mod'])
         os.utime(abs_path, (last_mod, last_mod))
         self.__conn.sendall(b'OK')
@@ -188,7 +188,10 @@ class Client:
             byte_count = 0
             byte_chunk = self.__conf['ram']
             while byte_count < byte_total:
-                data = self.__conn.recv(byte_chunk)
+                if byte_chunk != -1:
+                    data = self.__conn.recv(byte_chunk)
+                else:
+                    data = self.__conn.recv()
                 file.write(data)
                 byte_count += len(data)
     
@@ -199,7 +202,10 @@ class Client:
             byte_count = 0
             byte_chunk = self.__conf['ram']
             while byte_count < byte_total:
-                data = self.__conn.recv(byte_chunk)
+                if byte_chunk != -1:
+                    data = self.__conn.recv(byte_chunk)
+                else:
+                    data = self.__conn.recv()
                 zip_file.write(data)
                 byte_count += len(data)
         with gzip.open(z_path, 'rb+') as zip_file:
@@ -210,14 +216,14 @@ class Client:
         path = msg.decode('UTF-8')
         abs_path = path.replace('.', self.__root, 1)
         try:
-            self.__log(f'Deleting {path}...')
+            self.__logger.log(f'Deleting {path}...', 3)
             if not self.__conf['backup']:
                 if os.path.isdir(path):
                     shutil.rmtree(abs_path)
                 else:
                     os.remove(abs_path)
             else:
-                backup_path = path.replace('.', self.__backup_path, 1)
+                backup_path = path.replace('.', self.__conf['backup_path'], 1)
                 shutil.move(abs_path, backup_path)
         except FileNotFoundError:
             pass
@@ -231,23 +237,30 @@ class Client:
         if not os.path.exists(abs_path):
             ack = f'OK {path}'.encode()
             self.__conn.sendall(ack)
-            self.__log(f'Delete {path} confirmed.')
+            self.__logger.log(f'Delete {path} confirmed.', 3)
         else:
             deny = f'NO {path}'.encode()
             self.__conn.sendall(deny)
-            self.__log(f'Delete {path} denied.')
+            self.__logger.log(f'Delete {path} denied.', 3)
 
-    def __save_auth_key(self, auth_key):
-        self.__log('Receiving new key from Server...')
-        auth_key = auth_key.decode('UTF-8')
-        if os.path.exists(self.__auth_path):
-            with open(self.__auth_path, 'r') as file:
-                keys = json.load(file)
-            keys[self.__hostname] = auth_key
-        else:
-            keys = {self.__hostname: auth_key}
-        with open(self.__auth_path, 'w+') as file:
-            json.dump(keys, file, indent=4)
+    def __purge_backups(self):
+        self.__logger.log('Cleaning backups...', 2)
+        day_limit = self.__conf['backup_limit']
+        now_time = datetime.now()
+        for _, dirs, files in os.walk(self.__conf['backup_path'], topdown=True):
+            for _dir in dirs:
+                status = os.stat(_dir)
+                last_mod = datetime.fromtimestamp(status[stat.ST_MTIME])
+                delta = now_time - last_mod
+                if delta.days >= day_limit:
+                    shutil.rmtree(_dir)
+            for file in files:
+                status = os.stat(file)
+                last_mod = datetime.fromtimestamp(status[stat.ST_MTIME])
+                delta = now_time - last_mod
+                if delta.days >= day_limit:
+                    os.remove(file)
+        self.__logger.log('Backups cleaned...', 2)
 
     def __compress(self, path):
         file_name = f'{datetime.now().microsecond}_' + os.path.basename(os.path.normpath(path)) + '.gz'
@@ -257,44 +270,15 @@ class Client:
                 shutil.copyfileobj(f_in, f_out)
         return os.path.getsize(z_path), z_path
 
-    def __log(self, message):
-        if self.__conf['logging']:
-            self.__logger.log(message)
 
+def client_start(conf):
+    structure = File_Structure(conf['root'], conf['gitignore'], conf['purge_limit'])
+    while True:
+        client = Client(structure, **conf)
+        client.run()
 
-def get_conf(config_name):
-    if not os.path.exists(config_name):
-        home_dir = os.path.expanduser('~')
-        conf_path = os.path.join(home_dir, '.conf')
-        conf_path = os.path.join(conf_path, 'pysync')
-        config_name = os.path.join(conf_path, config_name)
-        if not os.path.exists(config_name):
-            raise FileNotFoundError('Config file not found')
-    with open(config_name, 'r') as file:
-        conf = json.load(file)
-    return conf
-
-
-def main(hostname, port, path, config_name=None):
-    if config_name is not None:
-        conf = get_conf(config_name)
-    else:
-        conf = {
-            'gitignore': False,
-            'purge_limit': 7,
-            'backup_limit': 7,
-        }
-    structure = File_Structure(path, conf['gitignore'], conf['purge_limit'])
-
-    client = Client(hostname, port, structure, backup=True, compression=6, authenticate=True, purge=True, logging=True, **conf)
-    client.run()
-
-    structure.update_structure()
-    structure.save_structure()
-
-
-if __name__ == "__main__":
-    hostname = 'localhost'
-    port = 1818
-    path = '.\\folder2'
-    main(hostname, port, path)
+        structure.update_structure()
+        structure.save_structure()
+        if conf['sleep_time'] == -1:
+            break
+        time.sleep(conf['sleep_time'])

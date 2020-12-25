@@ -22,9 +22,7 @@ class File_Structure:
         self.__user_conf_path = os.path.join(conf_path, stripped_root)
         self.__json_path = os.path.join(self.__user_conf_path, stripped_root+'.json')
         
-        print('Initializing file structure...')
         self.__structure = self.__get_structure()
-        print('File structure initialized.')
         
     def __get_structure(self):
         old_structure = self.__read_old_structure()
@@ -41,7 +39,6 @@ class File_Structure:
         return None
 
     def __build_file_structure(self):
-        print('Building new file structure...')
         paths = []
         for root, _dirs, _files in os.walk(self.__root, topdown=True):
             if self.__gitignore and '.gitignore' in _files:
@@ -53,7 +50,6 @@ class File_Structure:
         file_structure = {'root': self.__root}
         for path in paths:
             file_structure[path] = self.__discover(path)
-        print('New file structure built.')
         return file_structure
 
     def __process_gitignore(self, root):
@@ -102,35 +98,33 @@ class File_Structure:
         return info
 
     def __check_deletions(self, structure):
+        _structure = structure.copy()
         for path, info in structure.items():
             if path == 'root':
                 continue
             if info['deleted'] is None:
                 if not os.path.exists(path):
                     timestamp = datetime.datetime.now().timestamp()
-                    structure[path]['deleted'] = timestamp
-                    structure[path]['last_mod'] = timestamp
+                    _structure[path]['deleted'] = timestamp
+                    _structure[path]['last_mod'] = timestamp
             else:
                 delete_time = datetime.datetime.fromtimestamp(info['deleted'])
                 now_time = datetime.datetime.now()
                 delta = now_time - delete_time
                 if delta.days > self.__purge_limit:
-                    del structure[path]
+                    del _structure[path]
+        structure = _structure
         return structure
 
     def update_structure(self):
-        print('Updating file structure...')
         structure = self.__check_deletions(self.__structure)
         new_structure = self.__build_file_structure()
         self.__structure = {**structure, **new_structure}
-        print('Updated file structure.')
 
     def save_structure(self):
-        print('Saving structure...')
         os.makedirs(self.__user_conf_path, exist_ok=True)
         with open(self.__json_path, 'w+') as file:
             json.dump(self.__structure, file, indent=4)
-        print('Structure saved.')
 
     def dump_structure(self):
         new_structure = {}

@@ -1,4 +1,3 @@
-ServerThread is a thread
-Encryption
 Full error checking
 Interface
+Documentation
