@@ -12,6 +12,7 @@ import shutil
 import os
 import random
 from exceptions import *
+from thread_locker import Thread_Locker
 
 
 class ServerThread(Thread):
@@ -21,12 +22,13 @@ class ServerThread(Thread):
         self.__server_struct = server_struct
         self.__root = conf['root']
         self.__configure(conf)
+
+        Thread.__init__(self)
         self.setName(str(random.randint(10000, 99999)))
+        self.setDaemon(True)
+        
         self.__logger = Logger(self.__conf['logging'], self.__conf_path, addr[0],
                                self.__conf['logging_limit'], thread=self.getName())
-
-        self.daemon = True
-        Thread.__init__(self)
         
     def __configure(self, conf):
         home_dir = os.path.expanduser('~')
@@ -110,7 +112,7 @@ class ServerThread(Thread):
     def __request_struct(self):
         self.__logger.log('Requesting struct...', 2)
         self.__conn.sendall(b'REQUEST STRUCT')
-        data = self.__conn.recv(1024)
+        data = self.__recv(1024, b'REQUEST STRUCT')
         msg = data.decode('UTF-8').split(' ')
         if msg[0] == 'STRUCT':
             byte_total = msg[1]
@@ -166,7 +168,7 @@ class ServerThread(Thread):
         req = f'REQUEST {path}'
         self.__conn.sendall(req.encode())
 
-        data = self.__conn.recv(1024)
+        data = self.__recv(1024, req.encode())
         info = json.loads(data)
         if info['path'] != path:
             raise MissSpeakException('REQUEST File')
@@ -181,12 +183,13 @@ class ServerThread(Thread):
             else:
                 self.__recv_file(abs_path, byte_total)
         else:
-            open(abs_path, 'w+').close()
+            with Thread_Locker(abs_path):
+                open(abs_path, 'w+').close()
         last_mod = int(info['last_mod'])
         os.utime(abs_path, (last_mod, last_mod))
 
     def __recv_file(self, abs_path, byte_total):
-        with open(abs_path, 'wb+') as file:
+        with Thread_Locker(abs_path), open(abs_path, 'wb+') as file:
             byte_count = 0
             byte_chunk = self.__conf['ram']
             while byte_count < byte_total:
@@ -201,7 +204,7 @@ class ServerThread(Thread):
         file_name = f'{datetime.now().microsecond}_' + \
             os.path.basename(os.path.normpath(abs_path)) + '.gz'
         z_path = os.path.join(gettempdir(), file_name)
-        with open(z_path, 'wb+') as zip_file:
+        with Thread_Locker(abs_path), open(z_path, 'wb+') as zip_file:
             byte_count = 0
             byte_chunk = self.__conf['ram']
             while byte_count < byte_total:
@@ -212,7 +215,7 @@ class ServerThread(Thread):
                 zip_file.write(data)
                 byte_count += len(data)
         with gzip.open(z_path, 'rb+') as zip_file:
-            with open(abs_path, 'wb+') as file:
+            with Thread_Locker(abs_path), open(abs_path, 'wb+') as file:
                 shutil.copyfileobj(zip_file, file)
 
     def __send_directories(self, dirs):
@@ -222,7 +225,7 @@ class ServerThread(Thread):
             self.__conn.sendall(cmd.encode())
             self.__logger.log(f'Sending directory {_dir}...', 4)
 
-            data = self.__conn.recv(1024)
+            data = self.__recv(1024, cmd.encode())
             if data == ('OK ' + cmd).encode():
                 pass
             else:
@@ -242,13 +245,13 @@ class ServerThread(Thread):
             cmd = f"MKFILE {json.dumps(info)}"
             self.__conn.sendall(cmd.encode())
 
-            data = self.__conn.recv(1024)
+            data = self.__recv(1024, cmd.encode())
             client_ack = f"OK MKFILE {path} {byte_total}"
             if data == client_ack.encode():
                 self.__logger.log(f'Sending file {path} {byte_total}...', 4)
                 if byte_total > 0:
                     bytes_read = 0
-                    with open(abs_path, 'rb') as f:
+                    with Thread_Locker(abs_path), open(abs_path, 'rb') as f:
                         byte_chunk = self.__conf['ram']
                         while bytes_read < byte_total:
                             if byte_chunk != -1:
@@ -308,7 +311,7 @@ class ServerThread(Thread):
     def __confirm_delete(self, path):
         req = f'CONFIRM DELETE {path}'.encode()
         self.__conn.sendall(req)
-        data = self.__conn.recv(1024)
+        data = self.__recv(1024, req)
         if data == f'OK {path}'.encode():
             self.__logger.log(f'Delete {path} confirmed.', 3)
             return True
@@ -327,7 +330,7 @@ class ServerThread(Thread):
                 self.__conn.sendall(cmd.encode())
                 self.__logger.log(f'Sending {cmd}', 3)
 
-                data = self.__conn.recv(1024)
+                data = self.__recv(1024, cmd.encode())
                 if data != b'OK':
                     raise MissSpeakException('DELETE')
 
@@ -353,12 +356,20 @@ class ServerThread(Thread):
     def __compress(self, path):
         file_name = f'{datetime.now().microsecond}_' + \
             os.path.basename(os.path.normpath(path)) + '.gz'
-        with open(path, 'rb') as f_in:
+        with Thread_Locker(path), open(path, 'rb') as f_in:
             z_path = os.path.join(gettempdir(), file_name)
             with gzip.open(z_path, 'wb') as f_out:
                 shutil.copyfileobj(f_in, f_out)
         return os.path.getsize(z_path), z_path
     
+    def __recv(self, b, prev_cmd):
+        data = self.__conn.recv(b)
+        if data == b'RETRY':
+            self.__conn.sendall(prev_cmd)
+            return self.__recv(b, prev_cmd)
+        else:
+            return data
+
     def terminate(self):
         self.__conn.shutdown(socket.SHUT_RDWR)
         self.__conn.close()

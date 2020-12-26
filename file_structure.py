@@ -111,7 +111,7 @@ class File_Structure:
                 delete_time = datetime.datetime.fromtimestamp(info['deleted'])
                 now_time = datetime.datetime.now()
                 delta = now_time - delete_time
-                if delta.days > self.__purge_limit:
+                if self.__purge_limit is not None and delta.days > self.__purge_limit:
                     del _structure[path]
         structure = _structure
         return structure

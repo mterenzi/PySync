@@ -296,12 +296,7 @@ def standardize_response(response, units, num_type):
 
 
 def ask_path(prompt, default=None):
-    if default is None:
-        response = simple_response(prompt + ': ')
-    else:
-        response = simple_response(prompt + f' [{default}]' + ': ')
-        if response == '' and default is not None:
-            return default
+    response = simple_response(prompt, default)
     if os.path.exists(response):
         return response
     else:

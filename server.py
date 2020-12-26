@@ -4,6 +4,7 @@ from file_structure import File_Structure
 import ssl
 import time
 from threading import Thread
+import threading
 
 
 def update_struct(structure):
@@ -15,8 +16,21 @@ def update_struct(structure):
         time.sleep(5)
 
 
+def clean_locks(base_threads):
+    global thread_locks
+    while True:
+        print(thread_locks)
+        keys = list(thread_locks.keys())
+        for key in keys:
+            if thread_locks[key][0] <= 0:
+                del thread_locks[key]
+        time.sleep(2)
+
+
 def server_start(conf):
     global server_struct
+    global thread_locks
+    thread_locks = {}
     
     socket.setdefaulttimeout(conf['timeout'])
     structure = File_Structure(
@@ -28,13 +42,21 @@ def server_start(conf):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind((conf['hostname'], conf['port']))
         sock.listen(5)
-        threads = []
+        
         struct_updater = Thread(target=update_struct, args=[structure],
-                                daemon=True)
+                                daemon=True, name='Structure_Updater')
         struct_updater.start()
+        base_threads = threading.active_count() + 1
+        lock_cleaner = Thread(target=clean_locks, args=[base_threads], daemon=True, name='Lock_Cleaner')
+        lock_cleaner.start()
+        
+        threads = []
         try:
             while True:
-                conn, addr = sock.accept()
+                try:
+                    conn, addr = sock.accept()
+                except socket.timeout:
+                    continue
                 print(f'Connected to {addr}')
                 if conf['encryption']:
                     conn = context.wrap_socket(conn, server_side=True)
@@ -50,5 +72,6 @@ def server_start(conf):
                 threads = _threads
         except KeyboardInterrupt:
             struct_updater.join(0)
+            lock_cleaner.join(0)
             for thread in threads:
                 thread.join(0)

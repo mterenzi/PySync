@@ -43,8 +43,8 @@ class Client:
             'ram': conf['ram'],
             'backup': conf['backup'],
             'backup_path': conf['backup_path'],
-            'backup_limit': conf['backup_limit', 7],
-            'logging': conf['logging', 0],
+            'backup_limit': conf['backup_limit'],
+            'logging': conf['logging'],
             'logging_limit': conf['logging_limit'],
             'MAC': ':'.join(re.findall('..', '%012x' % uuid.getnode())),
         }
@@ -78,6 +78,7 @@ class Client:
             context.load_verify_locations(self.__cert)
             sock = context.wrap_socket(sock, server_hostname=self.__hostname)
         sock.connect((self.__hostname, self.__port))
+        print(f'Connected to Server ({self.__hostname}, {self.__port})')
         self.__logger.log('Connected to Server.', 2)
         return sock
 
@@ -92,7 +93,7 @@ class Client:
 
     def __process(self):
         data = b'OPEN'
-        while data[0:3] != b'BYE':
+        while data != b'BYE':
             data = self.__conn.recv(1024)
             if data == b'REQUEST STRUCT':
                 self.__send_struct()
@@ -106,6 +107,8 @@ class Client:
                 self.__delete_down(data[7:])
             elif data[0:14] == b'CONFIRM DELETE':
                 self.__confirm_delete(data[15:])
+            elif data != b'BYE':
+                self.__conn.sendall(b'RETRY')
 
     def __send_struct(self):
         self.__logger.log('Sending struct...', 2)
@@ -257,13 +260,19 @@ class Client:
                 last_mod = datetime.fromtimestamp(status[stat.ST_MTIME])
                 delta = now_time - last_mod
                 if delta.days >= day_limit:
-                    shutil.rmtree(_dir)
+                    try:
+                        shutil.rmtree(_dir)
+                    except IOError:
+                        continue
             for file in files:
                 status = os.stat(file)
                 last_mod = datetime.fromtimestamp(status[stat.ST_MTIME])
                 delta = now_time - last_mod
                 if delta.days >= day_limit:
-                    os.remove(file)
+                    try:
+                        os.remove(file)
+                    except IOError:
+                        continue
         self.__logger.log('Backups cleaned...', 2)
 
     def __compress(self, path):
@@ -277,14 +286,26 @@ class Client:
 
 
 def client_start(conf):
-    socket.setdefaulttimeout(conf['timeout'])
+    # socket.setdefaulttimeout(conf['timeout'])
     structure = File_Structure(conf['root'], conf['gitignore'], conf['purge_limit'])
+    tries = 0
     while True:
-        client = Client(structure, conf.copy())
-        client.run()
-
         structure.update_structure()
         structure.save_structure()
+        try:
+            client = Client(structure, conf.copy())
+            client.run()
+            tries = 0
+        except ConnectionRefusedError:
+            seconds = 30*tries
+            print(f'Connection refused. Sleeping for {seconds} seconds')
+            time.sleep(seconds)
+            tries += 1
+            tries = min(tries, 30)
+            continue
+        except ConnectionResetError:
+            pass
+
         if conf['sleep_time'] == -1:
             break
         time.sleep(conf['sleep_time'])

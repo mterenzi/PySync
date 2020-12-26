@@ -16,7 +16,7 @@ class Logger:
         stamp = f'[{time} {host} {self.__remote_host}]'
         if self.__thread is not None:
             stamp += f' {self.__thread}'
-        return 
+        return stamp
 
     def log(self, message, level):
         if level <= self.__log_level:
