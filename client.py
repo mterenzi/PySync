@@ -27,6 +27,7 @@ class Client:
         self.__cert = conf.get('cert', None)
         self.__configure(conf)
         self.__logger = Logger(self.__conf['logging'], self.__conf_path, self.__hostname, self.__conf['logging_limit'])
+        self.__dir_mods = []
     
     def __configure(self, conf):
         home_dir = os.path.expanduser('~')
@@ -67,6 +68,7 @@ class Client:
         finally:
             if self.__conf['backup_limit'] is not None:
                 self.__purge_backups()
+            self.__timeshift_dirs()
             time_elapsed = datetime.now() - start_time
             self.__logger.log(f'Time elapsed {time_elapsed}.', 2)
 
@@ -124,6 +126,7 @@ class Client:
             self.__conn.sendall(struct_bytes)
             self.__logger.log('Struct sent.', 2)
         else:
+            self.__logger.log('Send structure error', 1)
             raise MissSpeakException('STRUCT MissMatch')
 
     def __send_files(self, path):
@@ -145,7 +148,7 @@ class Client:
                 bytes_read = 0
                 self.__logger.log(f'Sending file {path} {byte_total}...', 4)
                 with open(abs_path, 'rb') as f:
-                    byte_chunk = self.__conf['ram']
+                    byte_chunk = min(self.__conf['ram'], byte_total)
                     while bytes_read < byte_total:
                         if byte_chunk != -1:
                             file_bytes = f.read(byte_chunk)
@@ -156,6 +159,7 @@ class Client:
                 if compressed:
                     os.remove(abs_path)
         else:
+            self.__logger.log('File send error', 1)
             raise MissSpeakException('REQUEST File')
 
     def __get_directory(self, msg):
@@ -166,6 +170,7 @@ class Client:
         abs_path = dir_path.replace('.', self.__root, 1)
         os.makedirs(abs_path, exist_ok=True)
         os.utime(abs_path, (last_mod, last_mod))
+        self.__dir_mods.append((abs_path, (last_mod, last_mod)))
         ack = 'OK MKDIR ' + msg
         self.__conn.sendall(ack.encode())
         self.__logger.log(f'Recieved directory {dir_path}', 4)
@@ -193,7 +198,7 @@ class Client:
     def __recv_file(self, abs_path, byte_total):
         with open(abs_path, 'wb+') as file:
             byte_count = 0
-            byte_chunk = self.__conf['ram']
+            byte_chunk = min(self.__conf['ram'], byte_total)
             while byte_count < byte_total:
                 if byte_chunk != -1:
                     data = self.__conn.recv(byte_chunk)
@@ -207,7 +212,7 @@ class Client:
         z_path = os.path.join(gettempdir(), file_name)
         with open(z_path, 'wb+') as zip_file:
             byte_count = 0
-            byte_chunk = self.__conf['ram']
+            byte_chunk = min(self.__conf['ram'], byte_total)
             while byte_count < byte_total:
                 if byte_chunk != -1:
                     data = self.__conn.recv(byte_chunk)
@@ -283,6 +288,10 @@ class Client:
             with gzip.open(z_path, 'wb') as f_out:
                 shutil.copyfileobj(f_in, f_out)
         return os.path.getsize(z_path), z_path
+    
+    def __timeshift_dirs(self):
+        for abs_path, mod in self.__dir_mods:
+            os.utime(abs_path, mod)
 
 
 def client_start(conf):

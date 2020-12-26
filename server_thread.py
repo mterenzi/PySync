@@ -29,6 +29,7 @@ class ServerThread(Thread):
         
         self.__logger = Logger(self.__conf['logging'], self.__conf_path, addr[0],
                                self.__conf['logging_limit'], thread=self.getName())
+        self.__dir_mods = []
         
     def __configure(self, conf):
         home_dir = os.path.expanduser('~')
@@ -48,26 +49,23 @@ class ServerThread(Thread):
         try:
             self.__sync_configs()
             self.__process()
-            if self.__conf['backup_limit'] is not None:
-                self.__purge_backups()
-            time_elapsed = datetime.now() - start_time
-            self.__logger.log(f'Time elapsed {time_elapsed}.', 2)
         except socket.timeout:
             self.__logger.log('Connection timeout with client.', 1)
-            try:
-                self.__conn.sendall(b'BYE')
-                self.__conn.shutdown(socket.SHUT_RDWR)
-                self.__conn.close()
-            except:
-                pass
         except MissSpeakException:
             self.__logger.log('Critical miscommunication. Closing connection.', 1)
+        finally:
             try:
                 self.__conn.sendall(b'BYE')
                 self.__conn.shutdown(socket.SHUT_RDWR)
                 self.__conn.close()
             except:
                 pass
+            self.__logger.log('Connection with Client closed.', 2)
+            if self.__conf['backup_limit'] is not None:
+                    self.__purge_backups()
+            self.__timeshift_dirs()
+            time_elapsed = datetime.now() - start_time
+            self.__logger.log(f'Time elapsed {time_elapsed}.', 2)
 
     def __sync_configs(self):
         self.__logger.log('Syncing configuration...', 2)
@@ -104,10 +102,6 @@ class ServerThread(Thread):
             if self.__conf['purge']:
                 self.__handle_deletes(deletes)
         self.__logger.log('Synced Server and Client.', 2)
-        self.__conn.sendall(b'BYE')
-        self.__conn.shutdown(socket.SHUT_RDWR)
-        self.__conn.close()
-        self.__logger.log('Connection with Client closed.', 2)
 
     def __request_struct(self):
         self.__logger.log('Requesting struct...', 2)
@@ -122,11 +116,12 @@ class ServerThread(Thread):
             self.__logger.log('Struct recieved.', 2)
             return json.loads(struct)
         else:
+            self.__logger.log('Struct missmatch', 1)
             raise MissSpeakException('STRUCT MissMatch')
 
     def __recv_bytes(self, byte_total):
         data = b''
-        byte_chunk = self.__conf['ram']
+        byte_chunk = min(self.__conf['ram'], byte_total)
         while len(data) < byte_total:
             if byte_chunk != -1:
                 data += self.__conn.recv(byte_chunk)
@@ -159,6 +154,7 @@ class ServerThread(Thread):
             last_mod = self.__client_struct[_dir]['last_mod']
             os.makedirs(abs_path, exist_ok=True)
             os.utime(abs_path, (last_mod, last_mod))
+            self.__dir_mods.append((abs_path, (last_mod, last_mod)))
 
     def __get_files(self, files):
         for path in files:
@@ -171,6 +167,7 @@ class ServerThread(Thread):
         data = self.__recv(1024, req.encode())
         info = json.loads(data)
         if info['path'] != path:
+            self.__logger.log('File request error', 1)
             raise MissSpeakException('REQUEST File')
         byte_total = info['bytes']
         ack = f"OK {byte_total}"
@@ -191,7 +188,7 @@ class ServerThread(Thread):
     def __recv_file(self, abs_path, byte_total):
         with Thread_Locker(abs_path), open(abs_path, 'wb+') as file:
             byte_count = 0
-            byte_chunk = self.__conf['ram']
+            byte_chunk = min(self.__conf['ram'], byte_total)
             while byte_count < byte_total:
                 if byte_chunk != -1:
                     data = self.__conn.recv(byte_chunk)
@@ -206,7 +203,7 @@ class ServerThread(Thread):
         z_path = os.path.join(gettempdir(), file_name)
         with Thread_Locker(abs_path), open(z_path, 'wb+') as zip_file:
             byte_count = 0
-            byte_chunk = self.__conf['ram']
+            byte_chunk = min(self.__conf['ram'], byte_total)
             while byte_count < byte_total:
                 if byte_chunk != -1:
                     data = self.__conn.recv(byte_chunk)
@@ -229,6 +226,7 @@ class ServerThread(Thread):
             if data == ('OK ' + cmd).encode():
                 pass
             else:
+                self.__logger.log('Send directory error', 1)
                 raise MissSpeakException('MKDIR MissMatch')
 
     def __send_files(self, up_files):
@@ -252,7 +250,7 @@ class ServerThread(Thread):
                 if byte_total > 0:
                     bytes_read = 0
                     with Thread_Locker(abs_path), open(abs_path, 'rb') as f:
-                        byte_chunk = self.__conf['ram']
+                        byte_chunk = min(self.__conf['ram'], byte_total)
                         while bytes_read < byte_total:
                             if byte_chunk != -1:
                                 file_bytes = f.read(byte_chunk)
@@ -264,8 +262,10 @@ class ServerThread(Thread):
                         os.remove(abs_path)
                 data = self.__conn.recv(1024)
                 if data != b'OK':
+                    self.__logger.log('Send file final ACK error', 1)
                     raise MissSpeakException('MKFILE ACK FINAL')
             else:
+                self.__logger.log('Send file ACK error', 1)
                 raise MissSpeakException('MKFILE ACK')
 
     def __handle_deletes(self, deletes):
@@ -319,6 +319,7 @@ class ServerThread(Thread):
             self.__logger.log(f'Delete {path} denied.', 3)
             return False
         else:
+            self.__logger.log('Confirm delete error', 1)
             raise MissSpeakException('CONFIRM DELETE')
 
     def __up_deletes(self, up_dirs, up_files):
@@ -332,6 +333,7 @@ class ServerThread(Thread):
 
                 data = self.__recv(1024, cmd.encode())
                 if data != b'OK':
+                    self.__logger.log('Send deletion error', 1)
                     raise MissSpeakException('DELETE')
 
     def __purge_backups(self):
@@ -369,6 +371,10 @@ class ServerThread(Thread):
             return self.__recv(b, prev_cmd)
         else:
             return data
+        
+    def __timeshift_dirs(self):
+        for abs_path, mod in self.__dir_mods:
+            os.utime(abs_path, mod)
 
     def terminate(self):
         self.__conn.shutdown(socket.SHUT_RDWR)

@@ -374,6 +374,10 @@ def main(conf=None):
         else:
             conf = _conf
             break
+    if os.name == 'nt':
+        os.system('cls')
+    else:
+        os.system('clear')
     if conf['server']:
         return server_start(conf)
     elif conf['client']:
