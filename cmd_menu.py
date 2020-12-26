@@ -20,6 +20,8 @@ def parse_args():
                         help='Hostname to connect to or broadcast as.')
     parser.add_argument('--port', type=int, default=None,
                         help='Port to connect to or bind to.')
+    parser.add_argument('--timeout', type=int, default=None,
+                        help='How long the connect will hang before timeing out.')
     parser.add_argument('--encryption', type=bool,
                         default=None, help='Use TLS or not.')
     parser.add_argument('--cert', type=str, default=None,
@@ -123,8 +125,11 @@ def configure_handshake(conf):
         else:
             conf['port'] = numeric_response(
                 'What port on the host are you connecting to?')
+    if conf.get('timeout', None) is None:
+        conf['timeout'] = numeric_response('How long, in seconds, can a connection hang before timing out?',
+                                           default=30)
     if conf.get('encryption', None) is None:
-        conf['encryption'] = yes_no('Would you like to use TLS encryption?')
+        conf['encryption'] = yes_no('Would you like to use TLS encryption?', default=False)
     if conf['encryption'] and conf.get('cert', None) is None:
         conf['cert'] = ask_path('Enter the path for the certificate file')
     if conf['encryption'] and conf['server'] and conf.get('key', None) is None:
@@ -136,21 +141,18 @@ def configure_deletes(conf):
     print()
     if conf.get('purge', None) is None:
         conf['purge'] = yes_no(
-            'Would you like the sync to be able to delete files between devices?')
+            'Would you like the sync to be able to delete files between devices?', default=False)
     if conf['purge'] and conf.get('purge_limit') is None:
         conf['purge_limit'] = numeric_response(
-            'How long, in days, should deleted items still be monitored before being forgotten?')
+            'How long, in days, should deleted items still be monitored before being forgotten?', default=7)
     if conf['purge'] and conf.get('backup', None) is None:
-        conf['backup'] = yes_no('Would you like to backup deleted files?')
+        conf['backup'] = yes_no('Would you like to backup deleted files?', default=False)
     if conf['backup'] and conf.get('backup_path', None) is None:
-        if yes_no('Would you like to set a specific backup path?'):
-            prompt = 'Provide a path for the backups'
-            conf['backup_path'] = simple_response(prompt)
-        else:
-            conf['backup_path'] = 'DEFAULT'
+        prompt = 'Provide a path for the backups'
+        conf['backup_path'] = simple_response(prompt, default='DEFAULT')
     if conf['backup'] and conf.get('backup_limit', None) is None:
         prompt = 'How long, in days, would you like to keep backed up files? (-1 to never delete)'
-        conf['backup_limit'] = numeric_response(prompt)
+        conf['backup_limit'] = numeric_response(prompt, default=7)
     return conf
 
 
@@ -162,13 +164,13 @@ def configure_limits(conf, unit_prompt, units):
         else:
             prompt = 'How much RAM would you like the Sync to use?'
         prompt += unit_prompt + '\nEnter -1 for unlimited.'
-        conf['ram'] = numeric_response(prompt, units)
+        conf['ram'] = numeric_response(prompt, units, default='1MB')
     if conf.get('compression', None) is None:
         conf['compression'] = yes_no(
-            'Would you like to compress large files before transmission?')
+            'Would you like to compress large files before transmission?', default=False)
     if conf['compression'] and conf.get('compression_min', None) is None:
         prompt = 'What is the minimum file sized that can be compressed?' + unit_prompt
-        conf['compression_min'] = numeric_response(prompt, units)
+        conf['compression_min'] = numeric_response(prompt, units, default=70)
     return conf
 
 
@@ -178,32 +180,37 @@ def configure_logging(conf, unit_prompt, units):
         prompt = 'Would you like to log information?'
         options = ['Nothing Logged', 'Errors Only', 'Errors and Summary Activity',
                    'Errors, Summary Activity, and Deletions', 'Nearly all Activity']
-        conf['logging'] = options.index(ask_options(prompt, options))
+        conf['logging'] = options.index(ask_options(prompt, options, default='Nothing Logged'))
     if conf['logging'] > 0 and conf.get('logging_limit', None) is None:
         prompt = 'What is the maximum file size of the log file?' + \
             unit_prompt + '\nEnter -1 for unlimited.'
-        conf['logging_limit'] = numeric_response(prompt, units)
+        conf['logging_limit'] = numeric_response(prompt, units, default='10MB')
     return conf
 
 
 def configure_misc(conf):
     if conf.get('gitignore', None) is None:
         conf['gitignore'] = yes_no(
-            'Would you like items from children gitignores to be excluded from the sync?')
+            'Would you like items from children gitignores to be excluded from the sync?', default=False)
     if conf['client'] and conf.get('sleep_time', None) is None:
         prompt = 'How long, in seconds, would you like the client to sleep before re-syncing? Enter -1 for single use.'
-        conf['sleep_time'] = numeric_response(prompt)
+        conf['sleep_time'] = numeric_response(prompt, default=-1)
     return conf
 
 
-def ask_options(prompt, options, confirm=True, title=True):
+def ask_options(prompt, options, confirm=True, title=True, default=None):
     print(prompt + ':')
     for idx, option in enumerate(options):
         if title:
             option = option.title()
         print(f'{idx+1} - {option}')
-    hint = f'Pick an option (1-{len(options)}): '
+    if default is None:
+        hint = f'Pick an option (1-{len(options)}): '
+    else:
+        hint = f'Pick an option (1-{len(options)}) [{options.index(default)+1}]: '
     option = input(hint)
+    if option == '' and default is not None:
+        return default
     try:
         option = int(option)
         try:
@@ -215,62 +222,91 @@ def ask_options(prompt, options, confirm=True, title=True):
             return option
         except IndexError:
             print(f'Invalid option. Must be between 1 and {len(options)}')
-            return ask_options(prompt, options, confirm)
+            return ask_options(prompt, options, confirm, title, default)
     except ValueError:
         print('Invalid option. Must be integer.')
-        return ask_options(prompt, options, confirm)
+        return ask_options(prompt, options, confirm, title, default)
 
 
-def simple_response(prompt):
-    response = input(prompt + ': ')
+def simple_response(prompt, default=None):
+    if default is None:
+        response = input(prompt + ': ')
+    else:
+        response = input(prompt + f' [{default}]' + ': ')
     if response != '':
         return response
+    elif response == '' and default is not None:
+        return default
     else:
         print('Please enter a valid response')
-        return simple_response(prompt)
+        return simple_response(prompt, default)
 
 
-def yes_no(prompt):
-    response = input(prompt + ' (y/n): ')
+def yes_no(prompt, default=None):
+    if default is None:
+        response = input(prompt + ' (y/n): ')
+    elif default:
+        response = input(prompt + ' ([y]/n): ')
+    elif not default:
+        response = input(prompt + ' (y/[n]): ')
+    else:
+        raise KeyError('Default must be True or False')
     if response.lower() == 'y':
         return True
     elif response.lower() == 'n':
         return False
+    elif response == '' and default is not None:
+        return default
     else:
         print('Please enter \'y\' or \'n\' as a valid response.')
-        return yes_no(prompt)
+        return yes_no(prompt, default)
 
 
-def numeric_response(prompt, units=[], num_type=int):
-    response = input(prompt + ': ')
-    if response == '':
-        print('Please enter a response.')
-        return numeric_response(prompt, units)
+def numeric_response(prompt, units=[], num_type=int, default=None):
+    if default is None:
+        response = input(prompt + ': ')
+    else:
+        try:
+            default = num_type(default)
+        except ValueError:
+            pass
+        response = input(prompt + f' [{default}]' + ': ')
+    try:
+        if response == '' and default is not None:
+            return standardize_response(default, units, num_type)
+        elif response == '':
+            print('Please enter a response.')
+            return numeric_response(prompt, units, num_type, default)
+        return standardize_response(response, units, num_type)
+    except ValueError:
+        print('Number must be an integer or a unit was incorrectly entered.')
+        return numeric_response(prompt, units, num_type, default)
+
+
+def standardize_response(response, units, num_type):
     if len(units) > 0:
         units.sort(key=len, reverse=True)
         for unit, callback in units:
             _slice = len(unit) * -1
             if response[_slice:].upper() == unit.upper():
-                try:
-                    response = num_type(response[:_slice])
-                    return callback(response)
-                except ValueError:
-                    print('Number must be an integer.')
-                    return numeric_response(prompt, units)
-    try:
+                response = num_type(response[:_slice])
+                return callback(response)
+    else:
         return num_type(response)
-    except ValueError:
-        print('Number must be an integer or a unit was incorrectly entered.')
-        return numeric_response(prompt, units)
 
 
-def ask_path(prompt):
-    response = simple_response(prompt)
+def ask_path(prompt, default=None):
+    if default is None:
+        response = simple_response(prompt + ': ')
+    else:
+        response = simple_response(prompt + f' [{default}]' + ': ')
+        if response == '' and default is not None:
+            return default
     if os.path.exists(response):
         return response
     else:
         print('That path does not exist. Try again.')
-        return ask_path(prompt)
+        return ask_path(prompt, default)
 
 
 def confirm_conf(conf):
@@ -309,11 +345,9 @@ def get_config_file(conf):
     return saved_conf
 
 
-def main(_conf=None):
-    if _conf is None:
+def main(conf=None):
+    if conf is None:
         conf = vars(parse_args())
-    else:
-        conf = _conf
 
     home_dir = os.path.expanduser('~')
     home_conf_path = os.path.join(home_dir, '.conf')
@@ -325,12 +359,6 @@ def main(_conf=None):
         print_intro()
         conf = check_for_config(conf, confs_path)
         print()
-        while True:
-            conf = configure(conf)
-            conf, done = confirm_conf(conf)
-            if done:
-                break
-        save_config(conf, confs_path)
     else:
         if not os.path.exists(conf['config']):
             test_path = os.path.join(confs_path, conf['config'])
@@ -341,10 +369,16 @@ def main(_conf=None):
                     return
             conf['config'] = test_path
         conf = get_config_file(conf)
+    while True:
         _conf = configure(conf.copy())
-        if conf != _conf:
-            save_config(_conf, confs_path)
-        conf = _conf
+        if _conf != conf:
+            conf, done = confirm_conf(_conf)
+            if done:
+                save_config(conf, confs_path)
+                break
+        else:
+            conf = _conf
+            break
     if conf['server']:
         return server_start(conf)
     elif conf['client']:

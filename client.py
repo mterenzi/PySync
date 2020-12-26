@@ -19,16 +19,16 @@ import time
 
 class Client:
 
-    def __init__(self, struct, **kwargs):
+    def __init__(self, struct, conf):
         self.__struct = struct
-        self.__hostname = kwargs.get('hostname')
-        self.__port = kwargs.get('port')
-        self.__root = kwargs.get('root')
-        self.__cert = kwargs.get('cert')
-        self.__configure(kwargs)
-        self.__logger = Logger(self.__conf['logging'], self.__conf_path, self.__hostname, False, self.__conf['logging_limit'])
+        self.__hostname = conf.get('hostname')
+        self.__port = conf.get('port')
+        self.__root = conf.get('root')
+        self.__cert = conf.get('cert', None)
+        self.__configure(conf)
+        self.__logger = Logger(self.__conf['logging'], self.__conf_path, self.__hostname, self.__conf['logging_limit'])
     
-    def __configure(self, kwargs):
+    def __configure(self, conf):
         home_dir = os.path.expanduser('~')
         stripped_root = os.path.basename(os.path.normpath(self.__root))
         conf_path = os.path.join(home_dir, '.conf')
@@ -36,16 +36,16 @@ class Client:
         self.__conf_path = os.path.join(conf_path, stripped_root)
         os.makedirs(self.__conf_path, exist_ok=True)
         self.__conf = {
-            'purge': kwargs.get('purge', False),
-            'encryption': kwargs.get('encryption', False),
-            'compression': kwargs.get('compression', 0),
-            'compression_min': kwargs.get('compression_min', 1_000_000),
-            'ram': kwargs.get('ram', 2048),
-            'backup': kwargs.get('backup', False),
-            'backup_path': kwargs.get('backup_path', 'DEFAULT'),
-            'backup_limit': kwargs.get('backup_limit', 7),
-            'logging': kwargs.get('logging', 0),
-            'logging_limit': kwargs.get('logging_limit', 1_000_000),
+            'purge': conf['purge'],
+            'encryption': conf['encryption'],
+            'compression': conf['compression'],
+            'compression_min': conf['compression_min'],
+            'ram': conf['ram'],
+            'backup': conf['backup'],
+            'backup_path': conf['backup_path'],
+            'backup_limit': conf['backup_limit', 7],
+            'logging': conf['logging', 0],
+            'logging_limit': conf['logging_limit'],
             'MAC': ':'.join(re.findall('..', '%012x' % uuid.getnode())),
         }
         if self.__conf['backup']:
@@ -55,16 +55,20 @@ class Client:
 
     def run(self):
         start_time = datetime.now()
-        self.__conn = self.__connect()
-        self.__sync_config()
-        self.__process()
-        self.__conn.shutdown(socket.SHUT_RDWR)
-        self.__conn.close()
-        self.__logger.log('Connection with Server closed.', 2)
-        if self.__conf['backup_limit'] is not None:
-            self.__purge_backups()
-        time_elapsed = datetime.now() - start_time
-        self.__logger.log(f'Time elapsed {time_elapsed}.', 2)
+        try:
+            self.__conn = self.__connect()
+            self.__sync_config()
+            self.__process()
+            self.__conn.shutdown(socket.SHUT_RDWR)
+            self.__conn.close()
+            self.__logger.log('Connection with Server closed.', 2)
+        except socket.timeout:
+            self.__logger.log('Connection timeout with Server.', 1)
+        finally:
+            if self.__conf['backup_limit'] is not None:
+                self.__purge_backups()
+            time_elapsed = datetime.now() - start_time
+            self.__logger.log(f'Time elapsed {time_elapsed}.', 2)
 
     def __connect(self):
         self.__logger.log('Connecting to Server...', 2)
@@ -263,6 +267,7 @@ class Client:
         self.__logger.log('Backups cleaned...', 2)
 
     def __compress(self, path):
+        self.__logger.log(f'Compressing {path}...', 4)
         file_name = f'{datetime.now().microsecond}_' + os.path.basename(os.path.normpath(path)) + '.gz'
         with open(path, 'rb') as f_in:
             z_path = os.path.join(gettempdir(), file_name)
@@ -272,9 +277,10 @@ class Client:
 
 
 def client_start(conf):
+    socket.setdefaulttimeout(conf['timeout'])
     structure = File_Structure(conf['root'], conf['gitignore'], conf['purge_limit'])
     while True:
-        client = Client(structure, **conf)
+        client = Client(structure, conf.copy())
         client.run()
 
         structure.update_structure()

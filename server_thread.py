@@ -2,49 +2,40 @@ from datetime import datetime
 import stat
 import zlib
 from logger import Logger
-from file_structure import File_Structure
-from binascii import hexlify
 from structure_comparer import Structure_Comparer
 from threading import Thread
 import socket
-import ssl
 import json
 import gzip
 from tempfile import gettempdir
 import shutil
 import os
+import random
 from exceptions import *
 
 
 class ServerThread(Thread):
 
-    def __init__(self, conn, addr, server_struct, **kwargs):
+    def __init__(self, conn, addr, server_struct, conf):
         self.__conn = conn
         self.__server_struct = server_struct
-        self.__root = kwargs['root']
-        self.__configure(kwargs)
-        self.__logger = Logger(self.__conf['logging'], self.__conf_path, addr[0], False, self.__conf['logging_limit'])
+        self.__root = conf['root']
+        self.__configure(conf)
+        self.setName(str(random.randint(10000, 99999)))
+        self.__logger = Logger(self.__conf['logging'], self.__conf_path, addr[0],
+                               self.__conf['logging_limit'], thread=self.getName())
+
+        self.daemon = True
         Thread.__init__(self)
         
-    def __configure(self, kwargs):
+    def __configure(self, conf):
         home_dir = os.path.expanduser('~')
         stripped_root = os.path.basename(os.path.normpath(self.__root))
         conf_path = os.path.join(home_dir, '.conf')
         conf_path = os.path.join(conf_path, 'pysync')
         self.__conf_path = os.path.join(conf_path, stripped_root)
         os.makedirs(self.__conf_path, exist_ok=True)
-        self.__conf = {
-            'purge': kwargs.get('purge', False),
-            'compression': kwargs.get('compression', 0),
-            'compression_min': kwargs.get('compression_min', 1_000_000),
-            'ram': kwargs.get('ram', 2048),
-            'backup': kwargs.get('backup', False),
-            'backup_path': kwargs.get('backup_path', 'DEFAULT'),
-            'backup_limit': kwargs.get('backup_limit', 7),
-            'key_size': kwargs.get('key_size', 128),
-            'logging': kwargs.get('logging', 0),
-            'logging_limit': kwargs.get('logging_limit', 1_000_000),
-        }
+        self.__conf = conf
         if self.__conf['backup']:
             if self.__conf['backup_path'] == 'DEFAULT':
                 self.__conf['backup_path'] = os.path.join(self.__conf_path, 'backups')
@@ -52,17 +43,35 @@ class ServerThread(Thread):
 
     def run(self):
         start_time = datetime.now()
-        self.__sync_configs()
-        self.__process()
-        if self.__conf['backup_limit'] is not None:
-            self.__purge_backups()
-        time_elapsed = datetime.now() - start_time
-        self.__logger.log(f'Time elapsed {time_elapsed}.', 2)
+        try:
+            self.__sync_configs()
+            self.__process()
+            if self.__conf['backup_limit'] is not None:
+                self.__purge_backups()
+            time_elapsed = datetime.now() - start_time
+            self.__logger.log(f'Time elapsed {time_elapsed}.', 2)
+        except socket.timeout:
+            self.__logger.log('Connection timeout with client.', 1)
+            try:
+                self.__conn.sendall(b'BYE')
+                self.__conn.shutdown(socket.SHUT_RDWR)
+                self.__conn.close()
+            except:
+                pass
+        except MissSpeakException:
+            self.__logger.log('Critical miscommunication. Closing connection.', 1)
+            try:
+                self.__conn.sendall(b'BYE')
+                self.__conn.shutdown(socket.SHUT_RDWR)
+                self.__conn.close()
+            except:
+                pass
 
     def __sync_configs(self):
         self.__logger.log('Syncing configuration...', 2)
         data = self.__conn.recv(1024)
         client_conf = json.loads(data)
+        self.__logger.log(f'Client MAC address: {client_conf["MAC"]}', 2)
         self.__conf['purge'] = client_conf['purge'] and self.__conf['purge']
         client_conf['purge'] = self.__conf['purge']
         self.__conf['compression'] = client_conf['compression'] and self.__conf['compression']

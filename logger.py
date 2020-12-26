@@ -3,17 +3,20 @@ import os
 
 class Logger:
     
-    def __init__(self, log_level, conf_path, remote_host, is_server, logging_limit):
+    def __init__(self, log_level, conf_path, remote_host, logging_limit, thread=None):
         self.__log_level = log_level
         self.__log_path = os.path.join(conf_path, 'logs.txt')
         self.__remote_host = remote_host
-        self.__is_server = is_server
+        self.__thread = thread
         self.__logging_limit = logging_limit
 
     def __stamp(self):
-        host = 'SERVER' if self.__is_server else 'CLIENT'
+        host = 'SERVER' if self.__thread is not None else 'CLIENT'
         time = datetime.now()
-        return f'[{time} {host} {self.__remote_host}]'
+        stamp = f'[{time} {host} {self.__remote_host}]'
+        if self.__thread is not None:
+            stamp += f' {self.__thread}'
+        return 
 
     def log(self, message, level):
         if level <= self.__log_level:

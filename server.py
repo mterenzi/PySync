@@ -17,6 +17,8 @@ def update_struct(structure):
 
 def server_start(conf):
     global server_struct
+    
+    socket.setdefaulttimeout(conf['timeout'])
     structure = File_Structure(
         conf['root'], conf['gitignore'], conf['purge_limit'])
     server_struct = structure.get_structure()
@@ -27,7 +29,8 @@ def server_start(conf):
         sock.bind((conf['hostname'], conf['port']))
         sock.listen(5)
         threads = []
-        struct_updater = Thread(target=update_struct, args=[structure])
+        struct_updater = Thread(target=update_struct, args=[structure],
+                                daemon=True)
         struct_updater.start()
         try:
             while True:
@@ -35,7 +38,7 @@ def server_start(conf):
                 print(f'Connected to {addr}')
                 if conf['encryption']:
                     conn = context.wrap_socket(conn, server_side=True)
-                thread = ServerThread(conn, addr, server_struct.copy(), **conf)
+                thread = ServerThread(conn, addr, server_struct.copy(), conf.copy())
                 thread.start()
                 threads.append(thread)
 
@@ -46,8 +49,6 @@ def server_start(conf):
                         _threads.remove(thread)
                 threads = _threads
         except KeyboardInterrupt:
-            struct_updater.kill()
+            struct_updater.join(0)
             for thread in threads:
                 thread.join(0)
-                if thread.is_alive():
-                    thread.kill()

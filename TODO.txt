@@ -1,3 +1,2 @@
 Full error checking
-Interface
 Documentation
