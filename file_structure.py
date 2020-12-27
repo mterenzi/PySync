@@ -6,8 +6,20 @@ import datetime
 
 
 class File_Structure:
+    """
+    Class for interrogating the local file structure.
+    """
 
     def __init__(self, root, gitignore, purge_limit):
+        """
+        Initializes File_Structure. Builds representation of file structure
+        for sync.
+
+        Args:
+            root (str): Root directory to parse.
+            gitignore (bool): Whether to parse gitignores
+            purge_limit (int): Number of days to keep deleted file records
+        """
         self.__root = os.path.abspath(root)
         if not os.path.exists(self.__root):
             os.mkdir(self.__root)
@@ -25,6 +37,12 @@ class File_Structure:
         self.__structure = self.__get_structure()
         
     def __get_structure(self):
+        """
+        Gets full file structure
+
+        Returns:
+            dict: File structure dictionary
+        """
         old_structure = self.__read_old_structure()
         new_structure = self.__build_file_structure()
         if old_structure is not None:
@@ -33,12 +51,24 @@ class File_Structure:
         return new_structure
 
     def __read_old_structure(self):
+        """
+        Grabs old file structure from previous syncs.
+
+        Returns:
+            dict: Old file structure dictionary.
+        """
         if os.path.exists(self.__json_path):
             with open(self.__json_path, 'r') as file:
                 return json.load(file)
         return None
 
     def __build_file_structure(self):
+        """
+        Builds new file structure dictionary from local files.
+
+        Returns:
+            dict: New file structure dictionary.
+        """
         paths = []
         for root, _dirs, _files in os.walk(self.__root, topdown=True):
             if self.__gitignore and '.gitignore' in _files:
@@ -53,6 +83,15 @@ class File_Structure:
         return file_structure
 
     def __process_gitignore(self, root):
+        """
+        Parse gitignore for exclusion patterns.
+
+        Args:
+            root (str): Root path
+
+        Returns:
+            list: List of regexs for exclusion.
+        """
         gitignore_path = os.path.join(root, '.gitignore')
         with open(gitignore_path, 'r') as f:
             lines = f.readlines()
@@ -71,6 +110,17 @@ class File_Structure:
         return ignore_patterns
 
     def __pattern_filter(self, dirs, files, ignore_patterns):
+        """
+        Filters directories and files by patterns.
+
+        Args:
+            dirs (list): List of directories.
+            files (list): List of files.
+            ignore_patterns (list): List of regular expressions.
+
+        Returns:
+            Tuple(list, list): Tuple of directories and files.
+        """
         remove_dirs = []
         remove_files = []
         for pattern in ignore_patterns:
@@ -87,6 +137,15 @@ class File_Structure:
         return dirs, files
 
     def __discover(self, path):
+        """
+        Get information on path object.
+
+        Args:
+            path (str): Object path
+
+        Returns:
+            dict: File object information
+        """
         status = os.stat(path)
         info = {
             'type': int(stat.S_ISDIR(status[stat.ST_MODE])),
@@ -98,6 +157,15 @@ class File_Structure:
         return info
 
     def __check_deletions(self, structure):
+        """
+        Checks if old paths have been deleted and removes stale deletions.
+
+        Args:
+            structure (dict): File structure dictionary.
+
+        Returns:
+            dict: File structure dictionary.
+        """
         _structure = structure.copy()
         for path, info in structure.items():
             if path == 'root':
@@ -117,16 +185,28 @@ class File_Structure:
         return structure
 
     def update_structure(self):
+        """
+        Updates structure in RAM.
+        """
         structure = self.__check_deletions(self.__structure)
         new_structure = self.__build_file_structure()
         self.__structure = {**structure, **new_structure}
 
     def save_structure(self):
+        """
+        Saves file structure to disk.
+        """
         os.makedirs(self.__user_conf_path, exist_ok=True)
         with open(self.__json_path, 'w+') as file:
             json.dump(self.__structure, file, indent=4)
 
     def dump_structure(self):
+        """
+        Gets file structure in bytes
+
+        Returns:
+            bytes: File structure dictionary as json dumps byte stream.
+        """
         new_structure = {}
         for path in self.__structure.keys():
             _path = path.replace(self.__root, '.', 1)
@@ -135,11 +215,26 @@ class File_Structure:
         return json.dumps(new_structure)
 
     def get_structure(self):
+        """
+        Get copy of file structure dictionary.
+
+        Returns:
+            dict: File structure dictionary copy.
+        """
         return self.__structure.copy()
 
     def print_structure(self):
+        """
+        Prints file structure dictionary to stdout.
+        """
         for path, info in self.__structure.items():
             print(f'{path}: {info}')
 
     def get_root(self):
+        """
+        Gets file structure root
+
+        Returns:
+            str: File structure root.
+        """
         return self.__root

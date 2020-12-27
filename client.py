@@ -16,45 +16,51 @@ from file_structure import File_Structure
 import time
 
 
-
 class Client:
-
+    """
+    Client instance. Handles client sync operations.
+    Call run() to begin connection and sync.
+    """
+    
     def __init__(self, struct, conf):
+        """
+        Creates client instance based on given configuration.
+        Performs sync off given file structure.
+
+        Args:
+            struct (dict): File structure dictionary from File_Structure class.
+            conf (dict): Configuration dictionary for client to operate.
+        """
         self.__struct = struct
-        self.__hostname = conf.get('hostname')
-        self.__port = conf.get('port')
-        self.__root = conf.get('root')
-        self.__cert = conf.get('cert', None)
-        self.__configure(conf)
+        self.__conf = conf
+        self.__hostname = self.__conf.get('hostname')
+        self.__port = self.__conf.get('port')
+        self.__root = self.__conf.get('root')
+        self.__cert = self.__conf.get('cert', None)
+        self.__configure()
         self.__logger = Logger(self.__conf['logging'], self.__conf_path, self.__hostname, self.__conf['logging_limit'])
         self.__dir_mods = []
     
-    def __configure(self, conf):
+    def __configure(self):
+        """
+        Configures base variables for Client class before sync.
+        """
         home_dir = os.path.expanduser('~')
         stripped_root = os.path.basename(os.path.normpath(self.__root))
         conf_path = os.path.join(home_dir, '.conf')
         conf_path = os.path.join(conf_path, 'pysync')
         self.__conf_path = os.path.join(conf_path, stripped_root)
         os.makedirs(self.__conf_path, exist_ok=True)
-        self.__conf = {
-            'purge': conf['purge'],
-            'encryption': conf['encryption'],
-            'compression': conf['compression'],
-            'compression_min': conf['compression_min'],
-            'ram': conf['ram'],
-            'backup': conf['backup'],
-            'backup_path': conf['backup_path'],
-            'backup_limit': conf['backup_limit'],
-            'logging': conf['logging'],
-            'logging_limit': conf['logging_limit'],
-            'MAC': ':'.join(re.findall('..', '%012x' % uuid.getnode())),
-        }
+        self.__conf['MAC'] = ':'.join(re.findall('..', '%012x' % uuid.getnode())),
         if self.__conf['backup']:
             if self.__conf['backup_path'] == 'DEFAULT':
                 self.__conf['backup_path'] = os.path.join(self.__conf_path, 'backups')
             os.makedirs(self.__conf['backup_path'], exist_ok=True)
 
     def run(self):
+        """
+        Starts the sync process for the client.
+        """
         start_time = datetime.now()
         try:
             self.__conn = self.__connect()
@@ -73,6 +79,12 @@ class Client:
             self.__logger.log(f'Time elapsed {time_elapsed}.', 2)
 
     def __connect(self):
+        """
+        Connects to remote server.
+
+        Returns:
+            Socket: Socket connected to remote server.
+        """
         self.__logger.log('Connecting to Server...', 2)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         if self.__conf['encryption']:
@@ -85,15 +97,37 @@ class Client:
         return sock
 
     def __sync_config(self):
+        """
+        Syncs configuration with Server to most agreeable preferences
+        """
         self.__logger.log('Syncing configuration...', 2)
-        conf_stream = json.dumps(self.__conf).encode()
+        conf_stream = json.dumps(self.__clean_config()).encode()
         self.__conn.sendall(conf_stream)
         data = self.__conn.recv(1024)
-        self.__conf = json.loads(data)
+        self.__conf.update(json.loads(data))
         self.__conn.sendall(data)
         self.__logger.log('Sync configured.', 2)
 
+    def __clean_config(self):
+        """
+        Cleans configuration of unnecessary or private data before
+        being sent to remote server.
+
+        Returns:
+            dict: Cleaned configuration dictionary
+        """
+        return {
+            'purge': self.__conf['purge'],
+            'compression': self.__conf['compression'],
+            'compression_min': self.__conf['compression_min'],
+            'ram': self.__conf['ram'],
+            'MAC': self.__conf['MAC'],
+        }
+
     def __process(self):
+        """
+        Processes commands from remote server.
+        """
         data = b'OPEN'
         while data != b'BYE':
             data = self.__conn.recv(1024)
@@ -113,6 +147,12 @@ class Client:
                 self.__conn.sendall(b'RETRY')
 
     def __send_struct(self):
+        """
+        Sends file structure to the server for comparrision.
+
+        Raises:
+            MissSpeakException: Raised if file structure acknowledgment fails.
+        """
         self.__logger.log('Sending struct...', 2)
         struct_bytes = self.__struct.dump_structure().encode('UTF-8')
         if self.__conf['compression'] and len(struct_bytes) >= self.__conf['compression_min']:
@@ -130,6 +170,16 @@ class Client:
             raise MissSpeakException('STRUCT MissMatch')
 
     def __send_files(self, path):
+        """
+        Sends file to remote server.
+
+        Args:
+            path (str): Local path of file to send.
+
+        Raises:
+            MissSpeakException: Raises if remote server does not correctly
+            acknowledge amount of bytes to be sent.
+        """
         abs_path = path.replace('.', self.__root, 1)
         info = self.__struct.get_structure()[abs_path]
         info['path'] = path
@@ -163,6 +213,12 @@ class Client:
             raise MissSpeakException('REQUEST File')
 
     def __get_directory(self, msg):
+        """
+        Creates directory specified by remote server.
+
+        Args:
+            msg (bytes): Directory creation command message.
+        """
         msg = msg.decode('UTF-8')
         msg_parts = msg.split(' ')
         last_mod = int(msg_parts[-1])
@@ -176,6 +232,12 @@ class Client:
         self.__logger.log(f'Recieved directory {dir_path}', 4)
 
     def __get_file(self, msg):
+        """
+        Downloads or creates file specified by remote server.
+
+        Args:
+            msg (bytes): File creation command message.
+        """
         info = json.loads(msg)
         path = info['path']
         abs_path = path.replace('.', self.__root, 1)
@@ -196,6 +258,13 @@ class Client:
         self.__conn.sendall(b'OK')
 
     def __recv_file(self, abs_path, byte_total):
+        """
+        Handles file download from remote server.
+
+        Args:
+            abs_path (str): Absolute path to place downloaded file.
+            byte_total (int): Total number of bytes to download.
+        """
         with open(abs_path, 'wb+') as file:
             byte_count = 0
             byte_chunk = min(self.__conf['ram'], byte_total)
@@ -208,6 +277,13 @@ class Client:
                 byte_count += len(data)
     
     def __recv_compressed_file(self, abs_path, byte_total):
+        """
+        Handles compressed file download from remote server.
+
+        Args:
+            abs_path (str): Absolute path to place downloaded file.
+            byte_total (int): Total number of bytes to download.
+        """
         file_name = f'{datetime.now().microsecond}_' + os.path.basename(os.path.normpath(abs_path)) + '.gz'
         z_path = os.path.join(gettempdir(), file_name)
         with open(z_path, 'wb+') as zip_file:
@@ -225,6 +301,12 @@ class Client:
                 shutil.copyfileobj(zip_file, file)
 
     def __delete_down(self, msg):
+        """
+        Handles deletion command from remote server.
+
+        Args:
+            msg (bytes): Deletion command from remote server.
+        """
         path = msg.decode('UTF-8')
         abs_path = path.replace('.', self.__root, 1)
         try:
@@ -244,6 +326,12 @@ class Client:
         self.__conn.sendall(b'OK')
 
     def __confirm_delete(self, path):
+        """
+        Confirms deletion of file for remote server.
+
+        Args:
+            path (str): Path of file to confirm for deletion.
+        """
         path = path.decode('UTF-8')
         abs_path = path.replace('.', self.__root, 1)
         if not os.path.exists(abs_path):
@@ -256,6 +344,9 @@ class Client:
             self.__logger.log(f'Delete {path} denied.', 3)
 
     def __purge_backups(self):
+        """
+        Removes old backups.
+        """
         self.__logger.log('Cleaning backups...', 2)
         day_limit = self.__conf['backup_limit']
         now_time = datetime.now()
@@ -281,21 +372,41 @@ class Client:
         self.__logger.log('Backups cleaned...', 2)
 
     def __compress(self, path):
+        """
+        Compresses file for upload.
+
+        Args:
+            path (str): Path to file for compression
+
+        Returns:
+            tuple(int, str): Tuple containing size of compressed file and its
+            path.
+        """
         self.__logger.log(f'Compressing {path}...', 4)
         file_name = f'{datetime.now().microsecond}_' + os.path.basename(os.path.normpath(path)) + '.gz'
         with open(path, 'rb') as f_in:
-            z_path = os.path.join(gettempdir(), file_name)
+            z_path = os.path.join(os.path.join(gettempdir(), 'pysync'), file_name)
             with gzip.open(z_path, 'wb') as f_out:
                 shutil.copyfileobj(f_in, f_out)
         return os.path.getsize(z_path), z_path
     
     def __timeshift_dirs(self):
+        """
+        Sets directories to proper last modification time after files are
+        created and removed within.
+        """
         for abs_path, mod in self.__dir_mods:
             os.utime(abs_path, mod)
 
 
 def client_start(conf):
-    # socket.setdefaulttimeout(conf['timeout'])
+    """
+    Schedules Client sync with remote server.
+
+    Args:
+        conf (dict): Configuration dictionary for Client.
+    """
+    socket.setdefaulttimeout(conf['timeout'])
     structure = File_Structure(conf['root'], conf['gitignore'], conf['purge_limit'])
     tries = 0
     while True:
@@ -308,9 +419,8 @@ def client_start(conf):
         except ConnectionRefusedError:
             seconds = 30*tries
             print(f'Connection refused. Sleeping for {seconds} seconds')
-            time.sleep(seconds)
+            time.sleep(min(seconds, 900))
             tries += 1
-            tries = min(tries, 30)
             continue
         except ConnectionResetError:
             pass

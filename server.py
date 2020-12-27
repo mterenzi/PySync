@@ -8,6 +8,12 @@ import threading
 
 
 def update_struct(structure):
+    """
+    Updates file structure representation repeatedly.
+
+    Args:
+        structure (File_Structure): Representation of local file structure.
+    """
     global server_struct
     while True:
         structure.update_structure()
@@ -16,7 +22,10 @@ def update_struct(structure):
         time.sleep(5)
 
 
-def clean_locks(base_threads):
+def clean_locks():
+    """
+    Cleans thread lock list repeatedly for memory consumption reasons.
+    """
     global thread_locks
     while True:
         print(thread_locks)
@@ -28,6 +37,12 @@ def clean_locks(base_threads):
 
 
 def server_start(conf):
+    """
+    Starts server and spawns off server threads for new client connections.
+
+    Args:
+        conf (dict): Configuration dictionary.
+    """
     global server_struct
     global thread_locks
     thread_locks = {}
@@ -46,8 +61,7 @@ def server_start(conf):
         struct_updater = Thread(target=update_struct, args=[structure],
                                 daemon=True, name='Structure_Updater')
         struct_updater.start()
-        base_threads = threading.active_count() + 1
-        lock_cleaner = Thread(target=clean_locks, args=[base_threads], daemon=True, name='Lock_Cleaner')
+        lock_cleaner = Thread(target=clean_locks, daemon=True, name='Lock_Cleaner')
         lock_cleaner.start()
         
         threads = []

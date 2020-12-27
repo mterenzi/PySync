@@ -12,26 +12,47 @@ import shutil
 import os
 import random
 from exceptions import *
-from thread_locker import Thread_Locker
+from thread_locker import File_Thread_Locker
 
 
 class ServerThread(Thread):
+    """
+    Server Thread class. Responsible for handling independent client 
+    connections.
+    """
 
     def __init__(self, conn, addr, server_struct, conf):
+        """
+        Builds server thread. Call with start() method.
+
+        Args:
+            conn (Socket): Socket with active connection between client and
+            server.
+            addr (tuple): Tuple of IP and port of client.
+            server_struct (dict): Local file structure dictionary.
+            conf (dict): Configuration dictionary for server thread.
+        """
         self.__conn = conn
         self.__server_struct = server_struct
         self.__root = conf['root']
         self.__configure(conf)
 
         Thread.__init__(self)
-        self.setName(str(random.randint(10000, 99999)))
+        self.setName(datetime.now().microsecond)
         self.setDaemon(True)
         
-        self.__logger = Logger(self.__conf['logging'], self.__conf_path, addr[0],
-                               self.__conf['logging_limit'], thread=self.getName())
+        self.__logger = Logger(self.__conf['logging'], self.__conf_path,
+                                addr[0], self.__conf['logging_limit'],
+                                thread=self.getName())
         self.__dir_mods = []
         
     def __configure(self, conf):
+        """
+        Additional configuration. Called within __init__.
+
+        Args:
+            conf (dict): Configuration dictionary.
+        """
         home_dir = os.path.expanduser('~')
         stripped_root = os.path.basename(os.path.normpath(self.__root))
         conf_path = os.path.join(home_dir, '.conf')
@@ -45,17 +66,21 @@ class ServerThread(Thread):
             os.makedirs(self.__conf['backup_path'], exist_ok=True)
 
     def run(self):
+        """
+        Main function of started Server thread. Performs sync between client and
+        server.
+        """
         start_time = datetime.now()
         try:
             self.__sync_configs()
             self.__process()
+            self.__conn.sendall(b'BYE')
         except socket.timeout:
             self.__logger.log('Connection timeout with client.', 1)
         except MissSpeakException:
             self.__logger.log('Critical miscommunication. Closing connection.', 1)
         finally:
             try:
-                self.__conn.sendall(b'BYE')
                 self.__conn.shutdown(socket.SHUT_RDWR)
                 self.__conn.close()
             except:
@@ -68,18 +93,25 @@ class ServerThread(Thread):
             self.__logger.log(f'Time elapsed {time_elapsed}.', 2)
 
     def __sync_configs(self):
+        """
+        Syncs configuration between Server and Client.
+
+        Raises:
+            MissSpeakException: Raised if configuration sync client
+            acknowledgment fails.
+        """
         self.__logger.log('Syncing configuration...', 2)
         data = self.__conn.recv(1024)
         client_conf = json.loads(data)
         self.__logger.log(f'Client MAC address: {client_conf["MAC"]}', 2)
         self.__conf['purge'] = client_conf['purge'] and self.__conf['purge']
         client_conf['purge'] = self.__conf['purge']
-        self.__conf['compression'] = client_conf['compression'] and self.__conf['compression']
+        self.__conf['compression'] = min(client_conf['compression'], self.__conf['compression'])
         client_conf['compression'] = self.__conf['compression']
         if self.__conf['compression']:
             self.__conf['compression_min'] = max(
                 min(client_conf['compression_min'], self.__conf['compression_min']), 0)
-        client_conf['compression'] = self.__conf['compression_min']
+        client_conf['compression_min'] = self.__conf['compression_min']
         self.__conf['ram'] = min(client_conf['ram'], self.__conf['ram'])
         client_conf['ram'] = self.__conf['ram']
 
@@ -92,6 +124,9 @@ class ServerThread(Thread):
         self.__logger.log('Synced configured.', 2)
 
     def __process(self):
+        """
+        Performs file synchronization steps.
+        """
         self.__client_struct = self.__request_struct()
         comparer = Structure_Comparer(self.__server_struct.copy(),
                                       self.__client_struct.copy())
@@ -104,6 +139,16 @@ class ServerThread(Thread):
         self.__logger.log('Synced Server and Client.', 2)
 
     def __request_struct(self):
+        """
+        Requests file structure dictionary from client.
+
+        Raises:
+            MissSpeakException: Raises if client is not prepared to send file
+            structure dictionary
+
+        Returns:
+            dict: Client file structure dictionary.
+        """
         self.__logger.log('Requesting struct...', 2)
         self.__conn.sendall(b'REQUEST STRUCT')
         data = self.__recv(1024, b'REQUEST STRUCT')
@@ -120,6 +165,15 @@ class ServerThread(Thread):
             raise MissSpeakException('STRUCT MissMatch')
 
     def __recv_bytes(self, byte_total):
+        """
+        Handles incoming bytes from client.
+
+        Args:
+            byte_total (int): Total number of bytes expected to be received.
+
+        Returns:
+            bytes: Bytes received from client.
+        """
         data = b''
         byte_chunk = min(self.__conf['ram'], byte_total)
         while len(data) < byte_total:
@@ -132,8 +186,16 @@ class ServerThread(Thread):
         return data
 
     def __handle_creates(self, creates):
+        """
+        Synchronizes creations locally and with the client.
+
+        Args:
+            creates (Tuple(Tuple(), Tuple())): Paths to be created.
+            ((Down_Directories, Down_Files), (Up_Directories, Up_Files))
+        """
         self.__logger.log('Handling creates...', 2)
         down, up = creates
+        
         down_dirs, down_files = down
         self.__logger.log('Getting directories...', 2)
         self.__get_directories(down_dirs)
@@ -148,6 +210,12 @@ class ServerThread(Thread):
         self.__logger.log('Creates handled.', 2)
 
     def __get_directories(self, dirs):
+        """
+        Creates new local directories.
+
+        Args:
+            dirs (list): List of directories to create.
+        """
         for _dir in dirs:
             abs_path = _dir.replace('.', self.__root, 1)
             self.__logger.log(f'Creating directory {_dir}...', 4)
@@ -157,10 +225,26 @@ class ServerThread(Thread):
             self.__dir_mods.append((abs_path, (last_mod, last_mod)))
 
     def __get_files(self, files):
+        """
+        Retrieves files from client.
+
+        Args:
+            files (list(str)): List of file paths to retrieve.
+        """
         for path in files:
             self.__download_file(path)
 
     def __download_file(self, path):
+        """
+        Requests file from client.
+
+        Args:
+            path (str): File path to download.
+
+        Raises:
+            MissSpeakException: Client has not successfully acknowledged file
+            request
+        """
         req = f'REQUEST {path}'
         self.__conn.sendall(req.encode())
 
@@ -180,13 +264,20 @@ class ServerThread(Thread):
             else:
                 self.__recv_file(abs_path, byte_total)
         else:
-            with Thread_Locker(abs_path):
+            with File_Thread_Locker(abs_path):
                 open(abs_path, 'w+').close()
         last_mod = int(info['last_mod'])
         os.utime(abs_path, (last_mod, last_mod))
 
     def __recv_file(self, abs_path, byte_total):
-        with Thread_Locker(abs_path), open(abs_path, 'wb+') as file:
+        """
+        Handles downloading of a remote file.
+
+        Args:
+            abs_path (str): Absolute path of the file to be downloaded.
+            byte_total (int): Total bytes expected to be received.
+        """
+        with File_Thread_Locker(abs_path), open(abs_path, 'wb+') as file:
             byte_count = 0
             byte_chunk = min(self.__conf['ram'], byte_total)
             while byte_count < byte_total:
@@ -198,10 +289,17 @@ class ServerThread(Thread):
                 byte_count += len(data)
 
     def __recv_compressed_file(self, abs_path, byte_total):
+        """
+        Handles downloading and decompression of remote file.
+
+        Args:
+            abs_path (str): Absolute path of the file to be downloaded.
+            byte_total (int): Total bytes expected to be received.
+        """
         file_name = f'{datetime.now().microsecond}_' + \
             os.path.basename(os.path.normpath(abs_path)) + '.gz'
         z_path = os.path.join(gettempdir(), file_name)
-        with Thread_Locker(abs_path), open(z_path, 'wb+') as zip_file:
+        with File_Thread_Locker(abs_path), open(z_path, 'wb+') as zip_file:
             byte_count = 0
             byte_chunk = min(self.__conf['ram'], byte_total)
             while byte_count < byte_total:
@@ -212,10 +310,19 @@ class ServerThread(Thread):
                 zip_file.write(data)
                 byte_count += len(data)
         with gzip.open(z_path, 'rb+') as zip_file:
-            with Thread_Locker(abs_path), open(abs_path, 'wb+') as file:
+            with File_Thread_Locker(abs_path), open(abs_path, 'wb+') as file:
                 shutil.copyfileobj(zip_file, file)
 
     def __send_directories(self, dirs):
+        """
+        Commands the client to create directories.
+
+        Args:
+            dirs (list): List of directories to remotely create.
+
+        Raises:
+            MissSpeakException: Raises if client fails to create directory.
+        """
         for _dir in dirs:
             abs_path = _dir.replace('.', self.__root, 1)
             cmd = f"MKDIR {_dir} {self.__server_struct[abs_path]['last_mod']}"
@@ -230,6 +337,18 @@ class ServerThread(Thread):
                 raise MissSpeakException('MKDIR MissMatch')
 
     def __send_files(self, up_files):
+        """
+        Sends file to remote client.
+
+        Args:
+            up_files (list): List of paths of files to send.
+
+        Raises:
+            MissSpeakException: Raises if client does not acknowledge the
+            request.
+            MissSpeakException: Raises if client does not acknowledge receiving
+            of file.
+        """
         for path in up_files:
             abs_path = path.replace('.', self.__root, 1)
             info = self.__server_struct[abs_path]
@@ -249,7 +368,7 @@ class ServerThread(Thread):
                 self.__logger.log(f'Sending file {path} {byte_total}...', 4)
                 if byte_total > 0:
                     bytes_read = 0
-                    with Thread_Locker(abs_path), open(abs_path, 'rb') as f:
+                    with File_Thread_Locker(abs_path), open(abs_path, 'rb') as f:
                         byte_chunk = min(self.__conf['ram'], byte_total)
                         while bytes_read < byte_total:
                             if byte_chunk != -1:
@@ -269,6 +388,13 @@ class ServerThread(Thread):
                 raise MissSpeakException('MKFILE ACK')
 
     def __handle_deletes(self, deletes):
+        """
+        Handles local and remote deletions.
+
+        Args:
+            deletes (Tuple(Tuple(), Tuple())): Paths to be deleted.
+            ((Down_Directories, Down_Files), (Up_Directories, Up_Files))
+        """
         self.__logger.log('Handling deletes...', 2)
         down, up = deletes
         down_dirs, down_files = down
@@ -281,6 +407,13 @@ class ServerThread(Thread):
         self.__logger.log('Deletes handled.', 2)
 
     def __down_deletes(self, down_dirs, down_files):
+        """
+        Deletes local file structure objects.
+
+        Args:
+            down_dirs (list): List of directories to delete.
+            down_files (list): List of files to delete.
+        """
         for _dir in down_dirs:
             if self.__confirm_delete(_dir):
                 abs_file = _dir.replace('.', self.__root, 1)
@@ -309,6 +442,18 @@ class ServerThread(Thread):
                     pass
 
     def __confirm_delete(self, path):
+        """
+        Confirms with Client file structure object is still marked for deletion.
+
+        Args:
+            path (str): Path to delete.
+
+        Raises:
+            MissSpeakException: Client is unable to confirm or deny deletion.
+
+        Returns:
+            bool: Whether allowed to delete path.
+        """
         req = f'CONFIRM DELETE {path}'.encode()
         self.__conn.sendall(req)
         data = self.__recv(1024, req)
@@ -323,6 +468,17 @@ class ServerThread(Thread):
             raise MissSpeakException('CONFIRM DELETE')
 
     def __up_deletes(self, up_dirs, up_files):
+        """
+        Sends delete command to client.
+
+        Args:
+            up_dirs (list): List of directories to delete.
+            up_files (list): List of files to delete.
+
+        Raises:
+            MissSpeakException: Raises if client cannot acknowledge deletion
+            request
+        """
         deletes = up_dirs + up_files
         for path in deletes:
             abs_path = path.replace('.', self.__root, 1)
@@ -337,6 +493,9 @@ class ServerThread(Thread):
                     raise MissSpeakException('DELETE')
 
     def __purge_backups(self):
+        """
+        Removes old backups
+        """
         self.__logger.log('Cleaning backups...', 2)
         day_limit = self.__conf['backup_limit']
         now_time = datetime.now()
@@ -356,15 +515,36 @@ class ServerThread(Thread):
         self.__logger.log('Backups cleaned...', 2)
 
     def __compress(self, path):
+        """
+        Compresses file using gzip.
+
+        Args:
+            path (str): Path of file to be compressed.
+
+        Returns:
+            Tuple(int, str): Size of compressed file and compressed file path.
+        """
         file_name = f'{datetime.now().microsecond}_' + \
             os.path.basename(os.path.normpath(path)) + '.gz'
-        with Thread_Locker(path), open(path, 'rb') as f_in:
-            z_path = os.path.join(gettempdir(), file_name)
-            with gzip.open(z_path, 'wb') as f_out:
+        with File_Thread_Locker(path), open(path, 'rb') as f_in:
+            z_path = os.path.join(os.path.join(gettempdir(), 'pysync'), file_name)
+            with gzip.open(z_path, 'wb', 
+                            compresslevel=self.__conf['compression']) as f_out:
                 shutil.copyfileobj(f_in, f_out)
         return os.path.getsize(z_path), z_path
     
     def __recv(self, b, prev_cmd):
+        """
+        Waits for client response and resends previous command if RETRY code is
+        received.
+
+        Args:
+            b (int): Number of bytes expected to be received.
+            prev_cmd (str): Previously sent command.
+
+        Returns:
+            bytes: Data received from client.
+        """
         data = self.__conn.recv(b)
         if data == b'RETRY':
             self.__conn.sendall(prev_cmd)
@@ -373,10 +553,19 @@ class ServerThread(Thread):
             return data
         
     def __timeshift_dirs(self):
+        """
+        Updates directories with last modified time.
+        """
         for abs_path, mod in self.__dir_mods:
             os.utime(abs_path, mod)
 
     def terminate(self):
-        self.__conn.shutdown(socket.SHUT_RDWR)
-        self.__conn.close()
+        """
+        Terminates thread slightly more gracefully.
+        """
+        try:
+            self.__conn.shutdown(socket.SHUT_RDWR)
+            self.__conn.close()
+        except:
+            pass
         super.terminate()
