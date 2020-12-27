@@ -28,7 +28,6 @@ def clean_locks():
     """
     global thread_locks
     while True:
-        print(thread_locks)
         keys = list(thread_locks.keys())
         for key in keys:
             if thread_locks[key][0] <= 0:
