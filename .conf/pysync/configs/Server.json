@@ -1,0 +1,21 @@
+{
+    "root": "C:\\Users\\maximiliant\\Pictures",
+    "host": "Server",
+    "hostname": "10.3.10.29",
+    "port": 5555,
+    "timeout": 30,
+    "encryption": false,
+    "cert": null,
+    "key": null,
+    "purge": true,
+    "purge_limit": 7,
+    "backup": false,
+    "backup_path": null,
+    "backup_limit": null,
+    "ram": 50000000,
+    "compression": 3,
+    "compression_min": 70,
+    "logging": 2,
+    "logging_limit": 10000000,
+    "gitignore": false
+}

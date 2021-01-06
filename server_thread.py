@@ -526,8 +526,10 @@ class ServerThread(Thread):
         """
         file_name = f'{datetime.now().microsecond}_' + \
             os.path.basename(os.path.normpath(path)) + '.gz'
+        temp_path = os.path.join(gettempdir(), 'pysync')
+        os.makedirs(temp_path, exist_ok=True)
         with File_Thread_Locker(path), open(path, 'rb') as f_in:
-            z_path = os.path.join(os.path.join(gettempdir(), 'pysync'), file_name)
+            z_path = os.path.join(temp_path, file_name)
             with gzip.open(z_path, 'wb', 
                             compresslevel=self.__conf['compression']) as f_out:
                 shutil.copyfileobj(f_in, f_out)
