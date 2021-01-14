@@ -429,8 +429,10 @@ class Client:
         """
         self.__logger.log(f'Compressing {path}...', 4)
         file_name = f'{datetime.now().microsecond}_' + os.path.basename(os.path.normpath(path)) + '.gz'
+        temp_path = os.path.join(gettempdir(), 'pysync')
+        os.makedirs(temp_path, exist_ok=True)
         with open(path, 'rb') as f_in:
-            z_path = os.path.join(os.path.join(gettempdir(), 'pysync'), file_name)
+            z_path = os.path.join(temp_path, file_name)
             with gzip.open(z_path, 'wb') as f_out:
                 shutil.copyfileobj(f_in, f_out)
         return os.path.getsize(z_path), z_path
