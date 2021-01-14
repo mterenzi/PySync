@@ -66,12 +66,19 @@ class Client:
             self.__conn = self.__connect()
             self.__sync_config()
             self.__process()
-            self.__conn.shutdown(socket.SHUT_RDWR)
-            self.__conn.close()
-            self.__logger.log('Connection with Server closed.', 2)
         except socket.timeout:
             self.__logger.log('Connection timeout with Server.', 1)
+        except json.JSONDecodeError:
+            self.__logger.log('Critical json decoding error', 1)
+        except MissSpeakException:
+            self.__logger.log('Critical miscommunication. Closing connection.', 1)
         finally:
+            try:
+                self.__conn.shutdown(socket.SHUT_RDWR)
+                self.__conn.close()
+            except:
+                pass
+            self.__logger.log('Connection with Server closed.', 2)
             if self.__conf['backup_limit'] is not None:
                 self.__purge_backups()
             self.__timeshift_dirs()
@@ -131,20 +138,23 @@ class Client:
         data = b'OPEN'
         while data != b'BYE':
             data = self.__conn.recv(1024)
-            if data == b'REQUEST STRUCT':
-                self.__send_struct()
-            elif data[0:7] == b'REQUEST':
-                self.__send_files(data[8:].decode('UTF-8'))
-            elif data[0:5] == b'MKDIR':
-                self.__get_directory(data[6:])
-            elif data[0:6] == b'MKFILE':
-                self.__get_file(data[7:])
-            elif data[0:6] == b'DELETE':
-                self.__delete_down(data[7:])
-            elif data[0:14] == b'CONFIRM DELETE':
-                self.__confirm_delete(data[15:])
-            elif data != b'BYE':
-                self.__conn.sendall(b'RETRY')
+            try:
+                if data == b'REQUEST STRUCT':
+                    self.__send_struct()
+                elif data[0:7] == b'REQUEST':
+                    self.__send_file(data[8:].decode('UTF-8'))
+                elif data[0:5] == b'MKDIR':
+                    self.__get_directory(data[6:])
+                elif data[0:6] == b'MKFILE':
+                    self.__get_file(data[7:])
+                elif data[0:6] == b'DELETE':
+                    self.__delete_down(data[7:])
+                elif data[0:14] == b'CONFIRM DELETE':
+                    self.__confirm_delete(data[15:])
+                elif data != b'BYE':
+                    self.__conn.sendall(b'RETRY')
+            except SkipResponseException:
+                pass
 
     def __send_struct(self):
         """
@@ -169,7 +179,7 @@ class Client:
             self.__logger.log('Send structure error', 1)
             raise MissSpeakException('STRUCT MissMatch')
 
-    def __send_files(self, path):
+    def __send_file(self, path):
         """
         Sends file to remote server.
 
@@ -186,8 +196,12 @@ class Client:
         byte_total = os.path.getsize(abs_path)
         compressed = False
         if self.__conf['compression'] and byte_total >= self.__conf['compression_min']:
+            try:
                 byte_total, abs_path = self.__compress(abs_path)
                 compressed = True
+            except PermissionError:
+                self.__conn.sendall(b'!!SKIP!!SKIP!!')
+                raise SkipResponseException()
         info['bytes'] = byte_total
         info_stream = json.dumps(info).encode()
         self.__conn.sendall(info_stream)
@@ -197,17 +211,27 @@ class Client:
             if byte_total > 0:
                 bytes_read = 0
                 self.__logger.log(f'Sending file {path} {byte_total}...', 4)
-                with open(abs_path, 'rb') as f:
-                    byte_chunk = min(self.__conf['ram'], byte_total)
-                    while bytes_read < byte_total:
-                        if byte_chunk != -1:
-                            file_bytes = f.read(byte_chunk)
-                        else:
-                            file_bytes = f.read()
-                        self.__conn.sendall(file_bytes)
-                        bytes_read += byte_chunk
+                try:
+                    with open(abs_path, 'rb') as f:
+                        byte_chunk = min(self.__conf['ram'], byte_total)
+                        while bytes_read < byte_total:
+                            if byte_chunk != -1:
+                                file_bytes = f.read(byte_chunk)
+                            else:
+                                file_bytes = f.read()
+                            self.__conn.sendall(file_bytes)
+                            bytes_read += byte_chunk
+                except PermissionError:
+                    self.__conn.sendall(b'!!SKIP!!SKIP!!')
+                    self.__logger.log('Permssion error encountered reading file'
+                                        , 1)
+                    raise SkipResponseException('REQUEST File')
                 if compressed:
-                    os.remove(abs_path)
+                    try:
+                        os.remove(abs_path)
+                    except PermissionError:
+                        self.__logger.log('Permssion error encountered deleting'
+                                            + ' compressed file', 1)
         else:
             self.__logger.log('File send error', 1)
             raise MissSpeakException('REQUEST File')
@@ -224,8 +248,12 @@ class Client:
         last_mod = int(msg_parts[-1])
         dir_path = ' '.join(msg_parts[:-1])
         abs_path = dir_path.replace('.', self.__root, 1)
-        os.makedirs(abs_path, exist_ok=True)
-        os.utime(abs_path, (last_mod, last_mod))
+        try:
+            os.makedirs(abs_path, exist_ok=True)
+            os.utime(abs_path, (last_mod, last_mod))
+        except PermissionError:
+            self.__logger.log('Permission error encountered creating directory '
+                            + abs_path, 1)
         self.__dir_mods.append((abs_path, (last_mod, last_mod)))
         ack = 'OK MKDIR ' + msg
         self.__conn.sendall(ack.encode())
@@ -247,12 +275,21 @@ class Client:
         byte_total = int(info['bytes'])
         self.__logger.log(f'Receiving file {path} {byte_total}...', 4)
         if byte_total > 0:
-            if self.__conf['compression'] and byte_total >= self.__conf['compression_min']:
-                self.__recv_compressed_file(abs_path, byte_total)
-            else:
-                self.__recv_file(abs_path, byte_total)
+            try:
+                if self.__conf['compression'] and byte_total >= self.__conf['compression_min']:
+                    self.__recv_compressed_file(abs_path, byte_total)
+                else:
+                    self.__recv_file(abs_path, byte_total)
+            except PermissionError:
+                self.__conn.sendall(b'!!SKIP!!SKIP!!')
+                self.__logger.log('Permssion error encountered receiving file', 
+                                    1)
+                raise SkipResponseException('Get file')
         else:
-            open(abs_path, 'wb+').close()
+            try:
+                open(abs_path, 'wb+').close()
+            except PermissionError:
+                raise SkipResponseException('Get file')
         last_mod = int(info['last_mod'])
         os.utime(abs_path, (last_mod, last_mod))
         self.__conn.sendall(b'OK')
@@ -268,13 +305,17 @@ class Client:
         with open(abs_path, 'wb+') as file:
             byte_count = 0
             byte_chunk = min(self.__conf['ram'], byte_total)
+            skip_cache = b''
             while byte_count < byte_total:
                 if byte_chunk != -1:
                     data = self.__conn.recv(byte_chunk)
                 else:
                     data = self.__conn.recv()
+                if b'!!SKIP!!SKIP!!' in skip_cache+data:
+                    raise SkipResponseException('Recv file')
                 file.write(data)
                 byte_count += len(data)
+                skip_cache = data[-14:]
     
     def __recv_compressed_file(self, abs_path, byte_total):
         """
@@ -289,13 +330,17 @@ class Client:
         with open(z_path, 'wb+') as zip_file:
             byte_count = 0
             byte_chunk = min(self.__conf['ram'], byte_total)
+            skip_cache = b''
             while byte_count < byte_total:
                 if byte_chunk != -1:
                     data = self.__conn.recv(byte_chunk)
                 else:
                     data = self.__conn.recv()
+                if b'!!SKIP!!SKIP!!' in skip_cache+data:
+                    raise SkipResponseException('Recv file')
                 zip_file.write(data)
                 byte_count += len(data)
+                skip_cache = data[-14:]
         with gzip.open(z_path, 'rb+') as zip_file:
             with open(abs_path, 'wb+') as file:
                 shutil.copyfileobj(zip_file, file)

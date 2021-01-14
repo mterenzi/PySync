@@ -160,7 +160,7 @@ def configure_handshake(conf):
                 'What port on the host are you connecting to?')
     if conf.get('timeout', None) is None:
         conf['timeout'] = numeric_response('How long, in seconds, can a connection hang before timing out?',
-                                           default=30)
+                                            default=30)
     if conf.get('encryption', None) is None:
         conf['encryption'] = yes_no(
             'Would you like to use TLS encryption?', default=False)
@@ -525,7 +525,8 @@ def confirm_conf(conf):
     for key, value in conf.items():
         print(f'{key.title()}: {value}')
     if not yes_no('Is this correct?'):
-        key = ask_options('Which would you like to change?', list(conf.keys()), hints=list(conf.values()))
+        key = ask_options('Which would you like to change?', list(conf.keys()),
+                            hints=list(conf.values()))
         conf[key] = None
         return conf, False
     return conf, True

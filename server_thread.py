@@ -77,8 +77,13 @@ class ServerThread(Thread):
             self.__conn.sendall(b'BYE')
         except socket.timeout:
             self.__logger.log('Connection timeout with client.', 1)
+        except json.JSONDecodeError:
+            self.__logger.log('Critical json decoding error', 1)
         except MissSpeakException:
-            self.__logger.log('Critical miscommunication. Closing connection.', 1)
+            self.__logger.log('Critical miscommunication. Closing connection.',
+                                1)
+        except SkipResponseException:
+            self.__logger.log('Client requested skip at incorrect time', 4)
         finally:
             try:
                 self.__conn.shutdown(socket.SHUT_RDWR)
@@ -129,16 +134,16 @@ class ServerThread(Thread):
         """
         self.__client_struct = self.__request_struct()
         comparer = Structure_Comparer(self.__server_struct.copy(),
-                                      self.__client_struct.copy())
+                                        self.__client_struct.copy())
         creates, deletes = comparer.compare_structures(self.__conf['purge'])
         self.__logger.log('Syncing Server and Client...', 2)
         if creates is not None and deletes is not None:
             self.__handle_creates(creates)
-            if self.__conf['purge']:
+            if self.__conf['purge'] and deletes is not None:
                 self.__handle_deletes(deletes)
         self.__logger.log('Synced Server and Client.', 2)
 
-    def __request_struct(self):
+    def __request_struct(self, error_count=0):
         """
         Requests file structure dictionary from client.
 
@@ -159,10 +164,18 @@ class ServerThread(Thread):
             self.__conn.sendall(struct_confirm.encode())
             struct = self.__recv_bytes(int(byte_total))
             self.__logger.log('Struct recieved.', 2)
-            return json.loads(struct)
+            try:
+                return json.loads(struct)
+            except json.JSONDecodeError:
+                self.__logger.log('Json decode failed', 1)
+                raise MissSpeakException('STRUCT MissMatch')
         else:
-            self.__logger.log('Struct missmatch', 1)
-            raise MissSpeakException('STRUCT MissMatch')
+            error_count += 1
+            if error_count >= 5:
+                self.__logger.log('Struct missmatch', 1)
+                raise MissSpeakException('STRUCT MissMatch')
+            else:
+                return self.__request_struct()
 
     def __recv_bytes(self, byte_total):
         """
@@ -220,9 +233,16 @@ class ServerThread(Thread):
             abs_path = _dir.replace('.', self.__root, 1)
             self.__logger.log(f'Creating directory {_dir}...', 4)
             last_mod = self.__client_struct[_dir]['last_mod']
-            os.makedirs(abs_path, exist_ok=True)
-            os.utime(abs_path, (last_mod, last_mod))
-            self.__dir_mods.append((abs_path, (last_mod, last_mod)))
+            try:
+                os.makedirs(abs_path, exist_ok=True)
+                os.utime(abs_path, (last_mod, last_mod))
+                self.__dir_mods.append((abs_path, (last_mod, last_mod)))
+            except PermissionError:
+                self.__logger.log('Permssion error encountered creating '
+                                    + f'directory {_dir}. Skipping...', 1)
+            except:
+                self.__logger.log('Unknown error encountered creating '
+                                    + f'directory {_dir}. Skipping...', 1)
 
     def __get_files(self, files):
         """
@@ -231,8 +251,17 @@ class ServerThread(Thread):
         Args:
             files (list(str)): List of file paths to retrieve.
         """
+        error_count = 0
         for path in files:
-            self.__download_file(path)
+            try:
+                self.__download_file(path)
+                error_count = 0
+            except MissSpeakException as error:
+                error_count += 1
+                if error_count >= 5:
+                    raise error
+            except SkipResponseException:
+                self.__logger.log('Client requested to directory creation.', 4)
 
     def __download_file(self, path):
         """
@@ -247,7 +276,7 @@ class ServerThread(Thread):
         """
         req = f'REQUEST {path}'
         self.__conn.sendall(req.encode())
-
+    
         data = self.__recv(1024, req.encode())
         info = json.loads(data)
         if info['path'] != path:
@@ -259,15 +288,36 @@ class ServerThread(Thread):
         self.__logger.log(f'Receiving file {path} {byte_total}...', 4)
         abs_path = path.replace('.', self.__root, 1)
         if byte_total > 0:
-            if self.__conf['compression'] and byte_total >= self.__conf['compression_min']:
-                self.__recv_compressed_file(abs_path, byte_total)
-            else:
-                self.__recv_file(abs_path, byte_total)
+            try:
+                if self.__conf['compression'] and byte_total >= self.__conf['compression_min']:
+                    self.__recv_compressed_file(abs_path, byte_total)
+                else:
+                    self.__recv_file(abs_path, byte_total)
+            except PermissionError:
+                self.__conn.sendall(b'!!SKIP!!SKIP!!')
+                self.__logger.log('Permssion error encountered creating '
+                                    + f'file {abs_path}. Skipping...', 1)
+            except:
+                self.__conn.sendall(b'!!SKIP!!SKIP!!')
+                self.__logger.log('Unknown error encountered creating '
+                                    + f'file {abs_path}. Skipping...', 1)
         else:
             with File_Thread_Locker(abs_path):
-                open(abs_path, 'w+').close()
+                try:
+                    open(abs_path, 'w+').close()
+                except PermissionError:
+                    self.__logger.log('Permssion error encountered creating '
+                                        + f'file {abs_path}. Skipping...', 1)
+                except:
+                    self.__logger.log('Unknown error encountered creating '
+                                        + f'file {abs_path}. Skipping...', 1)
         last_mod = int(info['last_mod'])
-        os.utime(abs_path, (last_mod, last_mod))
+        try:
+            os.utime(abs_path, (last_mod, last_mod))
+        except PermissionError:
+            self.__logger.log(
+                'Permission error updating last modification time for file'
+                + path, 1)
 
     def __recv_file(self, abs_path, byte_total):
         """
@@ -280,13 +330,17 @@ class ServerThread(Thread):
         with File_Thread_Locker(abs_path), open(abs_path, 'wb+') as file:
             byte_count = 0
             byte_chunk = min(self.__conf['ram'], byte_total)
+            skip_cache = b''
             while byte_count < byte_total:
                 if byte_chunk != -1:
                     data = self.__conn.recv(byte_chunk)
                 else:
                     data = self.__conn.recv()
+                if b'!!SKIP!!SKIP!!' in skip_cache+data:
+                    raise SkipResponseException()
                 file.write(data)
                 byte_count += len(data)
+                skip_cache = data[-14:]
 
     def __recv_compressed_file(self, abs_path, byte_total):
         """
@@ -302,13 +356,17 @@ class ServerThread(Thread):
         with File_Thread_Locker(abs_path), open(z_path, 'wb+') as zip_file:
             byte_count = 0
             byte_chunk = min(self.__conf['ram'], byte_total)
+            skip_cache = b''
             while byte_count < byte_total:
                 if byte_chunk != -1:
                     data = self.__conn.recv(byte_chunk)
                 else:
                     data = self.__conn.recv()
+                if b'!!SKIP!!SKIP!!' in skip_cache+data:
+                    raise SkipResponseException()
                 zip_file.write(data)
                 byte_count += len(data)
+                skip_cache = data[-14:]
         with gzip.open(z_path, 'rb+') as zip_file:
             with File_Thread_Locker(abs_path), open(abs_path, 'wb+') as file:
                 shutil.copyfileobj(zip_file, file)
@@ -323,22 +381,33 @@ class ServerThread(Thread):
         Raises:
             MissSpeakException: Raises if client fails to create directory.
         """
+        error_count = 0
         for _dir in dirs:
-            abs_path = _dir.replace('.', self.__root, 1)
-            cmd = f"MKDIR {_dir} {self.__server_struct[abs_path]['last_mod']}"
-            self.__conn.sendall(cmd.encode())
-            self.__logger.log(f'Sending directory {_dir}...', 4)
-
-            data = self.__recv(1024, cmd.encode())
-            if data == ('OK ' + cmd).encode():
-                pass
-            else:
+            try:
+                self.__send_directory(_dir)
+                error_count = 0
+            except MissSpeakException as error:
+                error_count += 1
                 self.__logger.log('Send directory error', 1)
-                raise MissSpeakException('MKDIR MissMatch')
+                if error_count >= 5:
+                    raise error
+            except SkipResponseException:
+                self.__logger.log('Client requested to directory creation.', 4)
+
+    def __send_directory(self, _dir):
+        abs_path = _dir.replace('.', self.__root, 1)
+        cmd = f"MKDIR {_dir} {self.__server_struct[abs_path]['last_mod']}"
+        self.__conn.sendall(cmd.encode())
+        self.__logger.log(f'Sending directory {_dir}...', 4)
+
+        data = self.__recv(1024, cmd.encode())
+        if data != ('OK ' + cmd).encode():
+            self.__logger.log('Send directory error', 1)
+            raise MissSpeakException('MKDIR MissMatch')
 
     def __send_files(self, up_files):
         """
-        Sends file to remote client.
+        Sends files to remote client.
 
         Args:
             up_files (list): List of paths of files to send.
@@ -349,27 +418,43 @@ class ServerThread(Thread):
             MissSpeakException: Raises if client does not acknowledge receiving
             of file.
         """
+        error_count = 0
         for path in up_files:
-            abs_path = path.replace('.', self.__root, 1)
-            info = self.__server_struct[abs_path]
-            info['path'] = path
-            byte_total = os.path.getsize(abs_path)
-            compressed = False
-            if self.__conf['compression'] and byte_total >= self.__conf['compression_min']:
-                byte_total, abs_path = self.__compress(abs_path)
-                compressed = True
-            info['bytes'] = byte_total
-            cmd = f"MKFILE {json.dumps(info)}"
-            self.__conn.sendall(cmd.encode())
+            try:
+                self.__send_file(path)
+                error_count = 0
+            except MissSpeakException as error:
+                error_count += 1
+                if error_count >= 5:
+                    raise error
+            except SkipResponseException:
+                self.__logger.log('Client requested to skip receiving file.', 4)
 
-            data = self.__recv(1024, cmd.encode())
-            client_ack = f"OK MKFILE {path} {byte_total}"
-            if data == client_ack.encode():
-                self.__logger.log(f'Sending file {path} {byte_total}...', 4)
-                if byte_total > 0:
-                    bytes_read = 0
+    def __send_file(self, path):
+        abs_path = path.replace('.', self.__root, 1)
+        info = self.__server_struct[abs_path]
+        info['path'] = path
+        byte_total = os.path.getsize(abs_path)
+        compressed = False
+        if self.__conf['compression'] and byte_total >= self.__conf['compression_min']:
+            try:
+                byte_total, abs_path = self.__compress(abs_path)
+            except PermissionError:
+                return
+            compressed = True
+        info['bytes'] = byte_total
+        cmd = f"MKFILE {json.dumps(info)}"
+        self.__conn.sendall(cmd.encode())
+
+        data = self.__recv(1024, cmd.encode())
+        client_ack = f"OK MKFILE {path} {byte_total}"
+        if data == client_ack.encode():
+            self.__logger.log(f'Sending file {path} {byte_total}...', 4)
+            if byte_total > 0:
+                bytes_read = 0
+                byte_chunk = min(self.__conf['ram'], byte_total)
+                try:
                     with File_Thread_Locker(abs_path), open(abs_path, 'rb') as f:
-                        byte_chunk = min(self.__conf['ram'], byte_total)
                         while bytes_read < byte_total:
                             if byte_chunk != -1:
                                 file_bytes = f.read(byte_chunk)
@@ -377,15 +462,30 @@ class ServerThread(Thread):
                                 file_bytes = f.read()
                             self.__conn.sendall(file_bytes)
                             bytes_read += len(file_bytes)
-                    if compressed:
+                except PermissionError:
+                    self.__logger.log(
+                        'Permssion error encountered sending file' + path, 1)
+                    self.__conn.sendall(b'!!SKIP!!SKIP!!')
+                    raise SkipResponseException()
+                except FileNotFoundError:
+                    self.__conn.sendall(b'!!SKIP!!SKIP!!')
+                    raise SkipResponseException()
+                if compressed:
+                    try:
                         os.remove(abs_path)
-                data = self.__conn.recv(1024)
-                if data != b'OK':
-                    self.__logger.log('Send file final ACK error', 1)
-                    raise MissSpeakException('MKFILE ACK FINAL')
-            else:
-                self.__logger.log('Send file ACK error', 1)
-                raise MissSpeakException('MKFILE ACK')
+                    except PermissionError:
+                        self.__logger.log('Unable to delete compressed file.', 1)
+                    except FileNotFoundError:
+                        pass
+            data = self.__conn.recv(1024)
+            if data != b'OK':
+                self.__logger.log('Send file final ACK error', 1)
+                raise MissSpeakException('MKFILE ACK FINAL')
+            elif data == b'!!SKIP!!SKIP!!':
+                raise SkipResponseException()
+        else:
+            self.__logger.log('Send file ACK error', 1)
+            raise MissSpeakException('MKFILE ACK')
 
     def __handle_deletes(self, deletes):
         """
@@ -414,32 +514,30 @@ class ServerThread(Thread):
             down_dirs (list): List of directories to delete.
             down_files (list): List of files to delete.
         """
+        error_count = 0
         for _dir in down_dirs:
-            if self.__confirm_delete(_dir):
-                abs_file = _dir.replace('.', self.__root, 1)
-                try:
-                    if not self.__conf['backup']:
-                        shutil.rmtree(abs_file)
-                    else:
-                        backup_path = _dir.replace('.', self.__conf['backup_path'], 1)
-                        shutil.move(abs_file, backup_path)
-                except FileNotFoundError:
-                    pass
-                except PermissionError:
-                    pass
+            try:
+                if self.__confirm_delete(_dir):
+                    self.__delete_dir(_dir)
+                    error_count = 0
+            except MissSpeakException as error:
+                error_count += 1
+                if error_count >= 5:
+                    raise error
+            except SkipResponseException:
+                self.__logger.log('Client requested to skip deletion.', 3)
+        error_count = 0
         for file in down_files:
-            if self.__confirm_delete(file):
-                abs_file = file.replace('.', self.__root, 1)
-                try:
-                    if not self.__conf['backup']:
-                        os.remove(abs_file)
-                    else:
-                        backup_path = file.replace('.', self.__conf['backup_path'], 1)
-                        shutil.move(abs_file, backup_path)
-                except FileNotFoundError:
-                    pass
-                except PermissionError:
-                    pass
+            try:
+                if self.__confirm_delete(file):
+                    self.__delete_file(file)
+                    error_count = 0
+            except MissSpeakException as error:
+                error_count += 1
+                if error_count >= 5:
+                    raise error
+            except SkipResponseException:
+                self.__logger.log('Client requested to skip deletion.', 3)
 
     def __confirm_delete(self, path):
         """
@@ -467,9 +565,49 @@ class ServerThread(Thread):
             self.__logger.log('Confirm delete error', 1)
             raise MissSpeakException('CONFIRM DELETE')
 
+    def __delete_dir(self, _dir):
+        """
+        Deletes a local directory
+
+        Args:
+            _dir (str): Relative path of directory
+        """
+        abs_file = _dir.replace('.', self.__root, 1)
+        try:
+            if not self.__conf['backup']:
+                shutil.rmtree(abs_file)
+            else:
+                backup_path = _dir.replace('.', self.__conf['backup_path'], 1)
+                shutil.move(abs_file, backup_path)
+        except FileNotFoundError:
+            pass
+        except PermissionError:
+            self.__logger.log('Permission error encountered deleting ' 
+                                + _dir, 1)
+
+    def __delete_file(self, file):
+        """
+        Deletes a local file
+
+        Args:
+            file (str): Relative path of file
+        """
+        abs_file = file.replace('.', self.__root, 1)
+        try:
+            if not self.__conf['backup']:
+                os.remove(abs_file)
+            else:
+                backup_path = file.replace('.', self.__conf['backup_path'], 1)
+                shutil.move(abs_file, backup_path)
+        except FileNotFoundError:
+            pass
+        except PermissionError:
+            self.__logger.log('Permission error encountered deleting ' 
+                                + file, 1)
+
     def __up_deletes(self, up_dirs, up_files):
         """
-        Sends delete command to client.
+        Sends delete commands to client.
 
         Args:
             up_dirs (list): List of directories to delete.
@@ -480,17 +618,38 @@ class ServerThread(Thread):
             request
         """
         deletes = up_dirs + up_files
+        
+        error_count = 0
         for path in deletes:
-            abs_path = path.replace('.', self.__root, 1)
-            if not os.path.exists(abs_path):
-                cmd = f'DELETE {path}'
-                self.__conn.sendall(cmd.encode())
-                self.__logger.log(f'Sending {cmd}', 3)
+            try:
+                self.__send_delete_cmd(path)
+                error_count = 0
+            except MissSpeakException as error:
+                error_count += 1
+                if error_count >= 5:
+                    raise error
 
-                data = self.__recv(1024, cmd.encode())
-                if data != b'OK':
-                    self.__logger.log('Send deletion error', 1)
-                    raise MissSpeakException('DELETE')
+    def __send_delete_cmd(self, path):
+        """
+        Sends delete command to client
+
+        Args:
+            path (str): Relative path to remotely delete.
+
+        Raises:
+            MissSpeakException: Raises if client cannot acknowledge deletion
+            request
+        """
+        abs_path = path.replace('.', self.__root, 1)
+        if not os.path.exists(abs_path):
+            cmd = f'DELETE {path}'
+            self.__conn.sendall(cmd.encode())
+            self.__logger.log(f'Sending {cmd}', 3)
+
+            data = self.__recv(1024, cmd.encode())
+            if data != b'OK':
+                self.__logger.log('Send deletion error', 1)
+                raise MissSpeakException('DELETE')
 
     def __purge_backups(self):
         """
@@ -549,6 +708,8 @@ class ServerThread(Thread):
         if data == b'RETRY':
             self.__conn.sendall(prev_cmd)
             return self.__recv(b, prev_cmd)
+        elif data == b'!!SKIP!!SKIP!!':
+            raise SkipResponseException()
         else:
             return data
         
